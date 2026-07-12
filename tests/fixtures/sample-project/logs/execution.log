@@ -1,0 +1,9 @@
+{"message": "ACME-InvoiceProcessing execution started", "level": "Information", "timeStamp": "2026-06-30T08:00:01"}
+{"message": "Initialization complete for queue ACME_Invoices", "level": "Information", "timeStamp": "2026-06-30T08:00:14"}
+{"message": "Transaction 1 retrieved.", "level": "Information", "timeStamp": "2026-06-30T08:00:20"}
+{"message": "Invoice INV-0001 extracted.", "level": "Information", "timeStamp": "2026-06-30T08:01:02"}
+{"message": "System exception: Selector not found for 'Submit invoice' (timeout 30s)", "level": "Error", "timeStamp": "2026-06-30T08:03:41"}
+{"message": "Transaction 2 retrieved.", "level": "Information", "timeStamp": "2026-06-30T08:03:50"}
+{"message": "Application slow, retrying page load", "level": "Warning", "timeStamp": "2026-06-30T08:04:10"}
+{"message": "Invoice INV-0002 extracted.", "level": "Information", "timeStamp": "2026-06-30T08:04:55"}
+{"message": "Process finished.", "level": "Information", "timeStamp": "2026-06-30T08:05:00"}

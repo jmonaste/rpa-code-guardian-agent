@@ -1,0 +1,130 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Main"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+ xmlns:sd="clr-namespace:System.Data;assembly=System.Data"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members>
+    <x:Property Name="in_OrchestratorQueueName" Type="InArgument(x:String)" sap2010:Annotation.AnnotationText="Name of the Orchestrator queue, overrides Config." />
+  </x:Members>
+  <TextExpression.NamespacesForImplementation>
+    <sco:Collection x:TypeArguments="x:String" xmlns:sco="clr-namespace:System.Collections.ObjectModel;assembly=mscorlib">
+      <x:String>System</x:String>
+    </sco:Collection>
+  </TextExpression.NamespacesForImplementation>
+  <StateMachine DisplayName="General Business Process" sap2010:Annotation.AnnotationText="REFramework: dispatch transactions from the queue through Init, Get Transaction Data, Process Transaction and End Process states.">
+    <StateMachine.Variables>
+      <Variable x:TypeArguments="scg:Dictionary(x:String, x:Object)" Name="Config" />
+      <Variable x:TypeArguments="sd:DataTable" Name="TransactionData" />
+      <Variable x:TypeArguments="sd:DataRow" Name="TransactionItem" />
+      <Variable x:TypeArguments="x:Int32" Name="TransactionNumber" Default="1" />
+      <Variable x:TypeArguments="x:Exception" Name="SystemException" />
+    </StateMachine.Variables>
+    <State x:Name="__ReferenceID0" DisplayName="Initialization" IsInitial="True">
+      <State.Entry>
+        <Sequence DisplayName="Init">
+          <ui:InvokeWorkflowFile DisplayName="Invoke InitAllSettings" WorkflowFileName="Framework\InitAllSettings.xaml">
+            <ui:InvokeWorkflowFile.Arguments>
+              <InArgument x:TypeArguments="x:String" x:Key="in_ConfigFile">Data\Config.xlsx</InArgument>
+              <OutArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)" x:Key="out_Config">[Config]</OutArgument>
+            </ui:InvokeWorkflowFile.Arguments>
+          </ui:InvokeWorkflowFile>
+          <ui:LogMessage DisplayName="Log init done" Level="Info" Message="[&quot;Initialization complete for queue &quot; + in_OrchestratorQueueName]" />
+        </Sequence>
+      </State.Entry>
+      <State.Transitions>
+        <Transition DisplayName="Successful">
+          <Transition.To>
+            <x:Reference>__ReferenceID1</x:Reference>
+          </Transition.To>
+        </Transition>
+        <Transition DisplayName="System error during initialization">
+          <Transition.To>
+            <x:Reference>__ReferenceID3</x:Reference>
+          </Transition.To>
+        </Transition>
+      </State.Transitions>
+    </State>
+    <State x:Name="__ReferenceID1" DisplayName="Get Transaction Data">
+      <State.Entry>
+        <ui:InvokeWorkflowFile DisplayName="Invoke GetTransactionData" WorkflowFileName="Framework\GetTransactionData.xaml">
+          <ui:InvokeWorkflowFile.Arguments>
+            <InArgument x:TypeArguments="x:Int32" x:Key="in_TransactionNumber">[TransactionNumber]</InArgument>
+            <InArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)" x:Key="in_Config">[Config]</InArgument>
+            <InOutArgument x:TypeArguments="sd:DataTable" x:Key="io_TransactionData">[TransactionData]</InOutArgument>
+            <OutArgument x:TypeArguments="sd:DataRow" x:Key="out_TransactionItem">[TransactionItem]</OutArgument>
+          </ui:InvokeWorkflowFile.Arguments>
+        </ui:InvokeWorkflowFile>
+      </State.Entry>
+      <State.Transitions>
+        <Transition DisplayName="New transaction">
+          <Transition.To>
+            <x:Reference>__ReferenceID2</x:Reference>
+          </Transition.To>
+        </Transition>
+        <Transition DisplayName="No data">
+          <Transition.To>
+            <x:Reference>__ReferenceID3</x:Reference>
+          </Transition.To>
+        </Transition>
+      </State.Transitions>
+    </State>
+    <State x:Name="__ReferenceID2" DisplayName="Process Transaction">
+      <State.Entry>
+        <Sequence DisplayName="Process wrapper">
+          <TryCatch DisplayName="Try process">
+            <TryCatch.Try>
+              <ui:InvokeWorkflowFile DisplayName="Invoke Process" WorkflowFileName="Process.xaml">
+                <ui:InvokeWorkflowFile.Arguments>
+                  <InArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)" x:Key="in_Config">[Config]</InArgument>
+                  <InArgument x:TypeArguments="sd:DataRow" x:Key="in_TransactionItem">[TransactionItem]</InArgument>
+                </ui:InvokeWorkflowFile.Arguments>
+              </ui:InvokeWorkflowFile>
+            </TryCatch.Try>
+            <TryCatch.Catches>
+              <Catch x:TypeArguments="x:Exception">
+                <ActivityAction x:TypeArguments="x:Exception">
+                  <ActivityAction.Argument>
+                    <DelegateInArgument x:TypeArguments="x:Exception" Name="exception" />
+                  </ActivityAction.Argument>
+                  <Sequence DisplayName="Capture system exception">
+                    <Assign DisplayName="Set SystemException">
+                      <Assign.To>
+                        <OutArgument x:TypeArguments="x:Exception">[SystemException]</OutArgument>
+                      </Assign.To>
+                      <Assign.Value>
+                        <InArgument x:TypeArguments="x:Exception">[exception]</InArgument>
+                      </Assign.Value>
+                    </Assign>
+                    <ui:LogMessage DisplayName="Log system exception" Level="Error" Message="[&quot;System exception: &quot; + exception.Message]" />
+                  </Sequence>
+                </ActivityAction>
+              </Catch>
+            </TryCatch.Catches>
+          </TryCatch>
+          <ui:InvokeWorkflowFile DisplayName="Invoke SetTransactionStatus" WorkflowFileName="Framework\SetTransactionStatus.xaml">
+            <ui:InvokeWorkflowFile.Arguments>
+              <InArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)" x:Key="in_Config">[Config]</InArgument>
+              <InArgument x:TypeArguments="x:Exception" x:Key="in_SystemException">[SystemException]</InArgument>
+            </ui:InvokeWorkflowFile.Arguments>
+          </ui:InvokeWorkflowFile>
+        </Sequence>
+      </State.Entry>
+      <State.Transitions>
+        <Transition DisplayName="Next transaction">
+          <Transition.To>
+            <x:Reference>__ReferenceID1</x:Reference>
+          </Transition.To>
+        </Transition>
+      </State.Transitions>
+    </State>
+    <State x:Name="__ReferenceID3" DisplayName="End Process" IsFinal="True">
+      <State.Entry>
+        <ui:LogMessage DisplayName="Log end" Level="Info" Message="[&quot;Process finished.&quot;]" />
+      </State.Entry>
+    </State>
+  </StateMachine>
+</Activity>

@@ -1,0 +1,48 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="ExtractInvoice"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members>
+    <x:Property Name="in_Config" Type="InArgument(scg:Dictionary(x:String, x:Object))" />
+    <x:Property Name="in_InvoiceId" Type="InArgument(x:String)" sap2010:Annotation.AnnotationText="Identifier of the invoice to extract." />
+    <x:Property Name="out_InvoiceNumber" Type="OutArgument(x:String)" />
+  </x:Members>
+  <Sequence DisplayName="Extract Invoice" sap2010:Annotation.AnnotationText="Downloads the invoice PDF and types the extracted number into the invoicing system.">
+    <Sequence.Variables>
+      <Variable x:TypeArguments="x:String" Name="InvoicePath" />
+    </Sequence.Variables>
+    <Assign DisplayName="Build invoice path">
+      <Assign.To>
+        <OutArgument x:TypeArguments="x:String">[InvoicePath]</OutArgument>
+      </Assign.To>
+      <Assign.Value>
+        <InArgument x:TypeArguments="x:String">[&quot;C:\Temp\invoices\&quot; + in_InvoiceId + &quot;.pdf&quot;]</InArgument>
+      </Assign.Value>
+    </Assign>
+    <ui:OpenBrowser DisplayName="Open invoicing system" Url="[in_Config(&quot;InvoiceSystemUrl&quot;).ToString]" />
+    <Delay DisplayName="Wait for page" Duration="00:00:05" />
+    <ui:TypeInto DisplayName="Type invoice number" Text="[in_InvoiceId]">
+      <ui:TypeInto.Target>
+        <ui:Target Selector="&lt;html app='chrome.exe' title='Invoice Entry' /&gt;&lt;webctrl id='invoice-number' /&gt;" />
+      </ui:TypeInto.Target>
+    </ui:TypeInto>
+    <ui:Click DisplayName="Submit invoice">
+      <ui:Click.Target>
+        <ui:Target Selector="&lt;html app='chrome.exe' title='Invoice Entry' /&gt;&lt;webctrl id='submit-button' /&gt;" />
+      </ui:Click.Target>
+    </ui:Click>
+    <Assign DisplayName="Store folder from config">
+      <Assign.To>
+        <OutArgument x:TypeArguments="x:String">[out_InvoiceNumber]</OutArgument>
+      </Assign.To>
+      <Assign.Value>
+        <InArgument x:TypeArguments="x:String">[in_Config(&quot;InvoiceFolder&quot;).ToString + in_InvoiceId]</InArgument>
+      </Assign.Value>
+    </Assign>
+    <ui:LogMessage DisplayName="Log extraction" Level="Info" Message="[&quot;Invoice &quot; + in_InvoiceId + &quot; extracted.&quot;]" />
+  </Sequence>
+</Activity>

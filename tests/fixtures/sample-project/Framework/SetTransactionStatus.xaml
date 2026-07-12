@@ -1,0 +1,31 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="SetTransactionStatus"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members>
+    <x:Property Name="in_Config" Type="InArgument(scg:Dictionary(x:String, x:Object))" />
+    <x:Property Name="in_SystemException" Type="InArgument(x:Exception)" />
+  </x:Members>
+  <Sequence DisplayName="Set Transaction Status">
+    <Delay DisplayName="Wait before status update" Duration="00:00:02" />
+    <TryCatch DisplayName="Try set status">
+      <TryCatch.Try>
+        <ui:SetTransactionStatus DisplayName="Update queue item status" Status="[If(in_SystemException Is Nothing, &quot;Successful&quot;, &quot;Failed&quot;)]" />
+      </TryCatch.Try>
+      <TryCatch.Catches>
+        <Catch x:TypeArguments="x:Exception">
+          <ActivityAction x:TypeArguments="x:Exception">
+            <ActivityAction.Argument>
+              <DelegateInArgument x:TypeArguments="x:Exception" Name="exception" />
+            </ActivityAction.Argument>
+            <Sequence DisplayName="Swallow" />
+          </ActivityAction>
+        </Catch>
+      </TryCatch.Catches>
+    </TryCatch>
+  </Sequence>
+</Activity>

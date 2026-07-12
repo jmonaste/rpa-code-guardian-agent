@@ -1,0 +1,42 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="GetTransactionData"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+ xmlns:sd="clr-namespace:System.Data;assembly=System.Data"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members>
+    <x:Property Name="in_TransactionNumber" Type="InArgument(x:Int32)" />
+    <x:Property Name="in_Config" Type="InArgument(scg:Dictionary(x:String, x:Object))" />
+    <x:Property Name="io_TransactionData" Type="InOutArgument(sd:DataTable)" />
+    <x:Property Name="out_TransactionItem" Type="OutArgument(sd:DataRow)" />
+  </x:Members>
+  <Sequence DisplayName="Get Transaction Data" sap2010:Annotation.AnnotationText="Fetches the next queue item to process; returns Nothing when the queue named in Config is empty.">
+    <ui:GetQueueItem DisplayName="Get transaction item" QueueName="[in_Config(&quot;OrchestratorQueueName&quot;).ToString]" />
+    <If DisplayName="Item available?" Condition="[in_TransactionNumber &lt;= io_TransactionData.Rows.Count]">
+      <If.Then>
+        <Assign DisplayName="Set transaction item">
+          <Assign.To>
+            <OutArgument x:TypeArguments="sd:DataRow">[out_TransactionItem]</OutArgument>
+          </Assign.To>
+          <Assign.Value>
+            <InArgument x:TypeArguments="sd:DataRow">[io_TransactionData.Rows(in_TransactionNumber - 1)]</InArgument>
+          </Assign.Value>
+        </Assign>
+      </If.Then>
+      <If.Else>
+        <Assign DisplayName="No more transactions">
+          <Assign.To>
+            <OutArgument x:TypeArguments="sd:DataRow">[out_TransactionItem]</OutArgument>
+          </Assign.To>
+          <Assign.Value>
+            <InArgument x:TypeArguments="sd:DataRow">[Nothing]</InArgument>
+          </Assign.Value>
+        </Assign>
+      </If.Else>
+    </If>
+    <ui:LogMessage DisplayName="Log transaction" Level="Info" Message="[&quot;Transaction &quot; + in_TransactionNumber.ToString + &quot; retrieved.&quot;]" />
+  </Sequence>
+</Activity>

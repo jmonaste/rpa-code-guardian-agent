@@ -1,0 +1,12 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="Unused"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members />
+  <Sequence DisplayName="Legacy extraction">
+    <ui:LogMessage DisplayName="Log legacy" Level="Warn" Message="[&quot;Legacy path used.&quot;]" />
+  </Sequence>
+</Activity>

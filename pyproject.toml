@@ -1,0 +1,38 @@
+[project]
+name = "rpa-code-guardian"
+version = "0.1.0"
+description = "LangGraph agent that analyzes a UiPath project and generates technical documentation and PDD compliance reports as Obsidian-ready Markdown."
+readme = "README.md"
+authors = [
+    { name = "javier monasterio", email = "javiermonasterio@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "langchain-core>=1.4.8",
+    "langchain-openai>=1.3.2",
+    "langgraph>=1.2.6",
+    "langgraph-checkpoint-sqlite>=3.0.4",
+    "openpyxl>=3.1.5",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.14.2",
+    "rich>=15.0.0",
+    "typer>=0.26.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+rpa-guardian = "rpa_code_guardian.cli:app"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+rpa_code_guardian = ["py.typed"]

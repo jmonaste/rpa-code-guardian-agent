@@ -1,0 +1,45 @@
+<Activity mc:Ignorable="sap sap2010" x:Class="InitAllSettings"
+ xmlns="http://schemas.microsoft.com/netfx/2009/xaml/activities"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+ xmlns:sap="http://schemas.microsoft.com/netfx/2009/xaml/activities/presentation"
+ xmlns:sap2010="http://schemas.microsoft.com/netfx/2010/xaml/activities/presentation"
+ xmlns:scg="clr-namespace:System.Collections.Generic;assembly=mscorlib"
+ xmlns:sd="clr-namespace:System.Data;assembly=System.Data"
+ xmlns:ui="http://schemas.uipath.com/workflow/activities"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <x:Members>
+    <x:Property Name="in_ConfigFile" Type="InArgument(x:String)" sap2010:Annotation.AnnotationText="Path to the configuration workbook." />
+    <x:Property Name="in_ConfigSheets" Type="InArgument(x:String[])" />
+    <x:Property Name="out_Config" Type="OutArgument(scg:Dictionary(x:String, x:Object))" />
+  </x:Members>
+  <Sequence DisplayName="Init All Settings" sap2010:Annotation.AnnotationText="Loads the Settings and Constants sheets of the Config workbook into a dictionary and fetches Orchestrator assets.">
+    <Sequence.Variables>
+      <Variable x:TypeArguments="sd:DataTable" Name="ConfigTable" />
+    </Sequence.Variables>
+    <Assign DisplayName="Initialize Config dictionary">
+      <Assign.To>
+        <OutArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)">[out_Config]</OutArgument>
+      </Assign.To>
+      <Assign.Value>
+        <InArgument x:TypeArguments="scg:Dictionary(x:String, x:Object)">[New Dictionary(Of String, Object)]</InArgument>
+      </Assign.Value>
+    </Assign>
+    <ui:ExcelReadRange DisplayName="Read Settings sheet" WorkbookPath="[in_ConfigFile]" SheetName="Settings" DataTable="[ConfigTable]" />
+    <ForEach x:TypeArguments="sd:DataRow" DisplayName="For each setting" Values="[ConfigTable.Rows]">
+      <ActivityAction x:TypeArguments="sd:DataRow">
+        <ActivityAction.Argument>
+          <DelegateInArgument x:TypeArguments="sd:DataRow" Name="row" />
+        </ActivityAction.Argument>
+        <Assign DisplayName="Add setting to Config">
+          <Assign.To>
+            <OutArgument x:TypeArguments="x:Object">[out_Config(row("Name").ToString)]</OutArgument>
+          </Assign.To>
+          <Assign.Value>
+            <InArgument x:TypeArguments="x:Object">[row("Value")]</InArgument>
+          </Assign.Value>
+        </Assign>
+      </ActivityAction>
+    </ForEach>
+    <ui:LogMessage DisplayName="Log settings loaded" Level="Info" Message="[&quot;Configuration loaded from &quot; + in_ConfigFile]" />
+  </Sequence>
+</Activity>
