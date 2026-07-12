@@ -14,6 +14,12 @@ Successor to [obsidian-agent](https://github.com/jmonaste/obsidian-agent), built
 on the same stack that already works on restricted corporate machines:
 LangGraph + `ChatOpenAI(base_url=...)` + typed settings + typer CLI.
 
+> **Studying the implementation?** [`docs/`](docs/README.md) contains full
+> engineering documentation: requirements and design decisions, pipeline
+> architecture, the XAML ingestion deep dive, context engineering, the LLM
+> gateway, the compliance subgraph, the testing strategy, and annotated
+> references for every technology used.
+
 ## How it works
 
 Projects can be arbitrarily large, so no raw file is ever handed to the LLM.
