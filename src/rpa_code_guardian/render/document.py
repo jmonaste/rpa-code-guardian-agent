@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..model.ir import ProjectInventory, WorkflowIR
-from .lint import lint_markdown, md_anchor, md_cell
+from .lint import lint_markdown, md_anchor, md_cell, normalize_prose
 
 MERMAID_MAX_EDGES = 60
 
@@ -35,16 +35,16 @@ def render_documentation(state: dict | object) -> str:
     title = inv.meta.name or Path(inv.root).name or "UiPath Process"
     sections: list[tuple[str, str]] = []
 
-    sections.append(("Executive summary", narrative.executive_summary if narrative else ""))
+    sections.append(("Executive summary", normalize_prose(narrative.executive_summary) if narrative else ""))
     sections.append(("Project overview", _overview(inv)))
-    sections.append(("Process description", narrative.process_description if narrative else ""))
+    sections.append(("Process description", normalize_prose(narrative.process_description) if narrative else ""))
     sections.append(("Architecture", _architecture(inv, narrative)))
     if inv.config_entries:
         sections.append(("Configuration", _configuration(inv)))
     sections.append(("Workflow reference", _workflow_reference(inv, summaries)))
     sections.append(("Exception handling and logging", _exceptions(narrative)))
     if narrative and narrative.external_systems:
-        sections.append(("External systems", narrative.external_systems))
+        sections.append(("External systems", normalize_prose(narrative.external_systems)))
     if inv.log_digest.files:
         sections.append(("Execution log observations", _logs(inv)))
     sections.append(("Improvement suggestions", _findings(findings)))
@@ -95,7 +95,7 @@ def _overview(inv: ProjectInventory) -> str:
 def _architecture(inv: ProjectInventory, narrative) -> str:
     parts: list[str] = []
     if narrative and narrative.architecture:
-        parts.append(narrative.architecture)
+        parts.append(normalize_prose(narrative.architecture))
     entry_ir = inv.workflows.get(inv.call_graph.entry)
     if entry_ir is not None and entry_ir.states:
         parts.append("State machine states of the entry workflow: " + ", ".join(entry_ir.states) + ".")
@@ -199,9 +199,9 @@ def _workflow_reference(inv: ProjectInventory, summaries: dict) -> str:
 def _exceptions(narrative) -> str:
     parts = []
     if narrative and narrative.exception_strategy:
-        parts.append(narrative.exception_strategy)
+        parts.append(normalize_prose(narrative.exception_strategy))
     if narrative and narrative.logging_observability:
-        parts.append(narrative.logging_observability)
+        parts.append(normalize_prose(narrative.logging_observability))
     return "\n\n".join(parts)
 
 
@@ -316,7 +316,7 @@ def render_compliance(state: dict | object) -> str:
         out.append("No gaps or deviations were identified.")
     for req, item in deviations:
         out += [f"### {req.id} — {item.verdict}", "", f"Requirement: {req.text}", ""]
-        out.append(item.justification)
+        out.append(normalize_prose(item.justification))
         if item.gap:
             out += ["", f"Gap: {item.gap}"]
         out.append("")
