@@ -26,7 +26,50 @@ from .config import Settings
 
 T = TypeVar("T", bound=BaseModel)
 
-_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+# Reasoning models (e.g. gpt-oss) may wrap their answer in a <think>…</think>
+# block; strip it before hunting for the JSON object.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _iter_json_objects(text: str):
+    """Yield every balanced ``{...}`` substring, ignoring braces inside strings."""
+    depth = 0
+    start = -1
+    in_str = False
+    escape = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                yield text[start : i + 1]
+
+
+def _candidate_payloads(data: object):
+    """The object itself, plus its one-level-nested dicts.
+
+    Local models often wrap the real object under a key named after the schema
+    (``{"WorkflowSummary": {...}}``) or echo the schema's ``{"properties": {...}}``;
+    trying the nested dicts recovers the intended payload.
+    """
+    if isinstance(data, dict):
+        yield data
+        for value in data.values():
+            if isinstance(value, dict):
+                yield value
 
 
 class GuardianLLMError(RuntimeError):
@@ -58,6 +101,7 @@ class GuardianLLM:
                 base_url=self.settings.openai_base_url,
                 api_key=self.settings.openai_api_key,
                 temperature=self.settings.temperature,
+                max_tokens=self.settings.max_tokens,
                 http_client=http_client,
             )
         return self._models[role]
@@ -65,20 +109,44 @@ class GuardianLLM:
     # ------------------------------------------------------------------ #
 
     def structured(self, schema: type[T], system: str, user: str, role: str = "worker") -> T:
-        """Return an instance of ``schema`` produced by the model."""
+        """Return an instance of ``schema`` produced by the model.
+
+        Local models vary in how well they honor structured output, so we try
+        increasingly permissive strategies: guided JSON (``json_schema``, which
+        constrains decoding to the schema on capable endpoints like vLLM), then
+        tool calling, then a plain completion whose JSON we parse ourselves.
+        """
         llm = self._chat_model(role)
+        result = self._try_structured(llm, schema, system, user, "json_schema", retry=False)
+        if result is not None:
+            return result
+        result = self._try_structured(llm, schema, system, user, "function_calling", retry=True)
+        if result is not None:
+            return result
+        return self._structured_via_json(schema, system, user, role)
+
+    def _try_structured(
+        self, llm, schema: type[T], system: str, user: str, method: str, retry: bool
+    ) -> T | None:
+        """One structured-output attempt via ``method``, with an optional single retry.
+
+        Returns the validated instance, or ``None`` if the endpoint does not
+        support the method or the model did not produce a valid instance.
+        """
         try:
-            runner = llm.with_structured_output(schema, method="function_calling")
+            runner = llm.with_structured_output(schema, method=method)
             result = runner.invoke([SystemMessage(content=system), HumanMessage(content=user)])
             if isinstance(result, schema):
                 return result
         except Exception as first_error:  # noqa: BLE001 - endpoint/validation quirks
+            if not retry:
+                return None
             retry_note = (
                 f"\n\nYour previous attempt failed with: {first_error}."
                 " Respond again, satisfying the schema exactly."
             )
             try:
-                runner = llm.with_structured_output(schema, method="function_calling")
+                runner = llm.with_structured_output(schema, method=method)
                 result = runner.invoke(
                     [SystemMessage(content=system), HumanMessage(content=user + retry_note)]
                 )
@@ -86,10 +154,16 @@ class GuardianLLM:
                     return result
             except Exception:  # noqa: BLE001
                 pass
-        return self._structured_via_json(schema, system, user, role)
+        return None
 
     def _structured_via_json(self, schema: type[T], system: str, user: str, role: str) -> T:
-        """Fallback: plain completion asked to emit JSON matching the schema."""
+        """Fallback: plain completion asked to emit JSON matching the schema.
+
+        Local models are inconsistent here: they wrap the object under a key
+        named after the schema, prepend a reasoning block, or emit several
+        objects. So we strip reasoning, collect every balanced JSON object, and
+        accept the first candidate (or one-level-nested dict) that validates.
+        """
         llm = self._chat_model(role)
         prompt = (
             f"{user}\n\nRespond with ONLY a JSON object matching this schema"
@@ -97,13 +171,22 @@ class GuardianLLM:
         )
         reply = llm.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
-        match = _JSON_BLOCK_RE.search(text)
-        if not match:
-            raise GuardianLLMError(f"model returned no JSON for {schema.__name__}")
-        try:
-            return schema.model_validate_json(match.group(0))
-        except ValidationError as exc:
-            raise GuardianLLMError(f"invalid {schema.__name__} JSON: {exc}") from exc
+        text = _THINK_RE.sub("", text)
+
+        first_error: ValidationError | None = None
+        for block in _iter_json_objects(text):
+            try:
+                data = json.loads(block)
+            except json.JSONDecodeError:
+                continue
+            for payload in _candidate_payloads(data):
+                try:
+                    return schema.model_validate(payload)
+                except ValidationError as exc:
+                    first_error = first_error or exc
+        if first_error is not None:
+            raise GuardianLLMError(f"invalid {schema.__name__} JSON: {first_error}") from first_error
+        raise GuardianLLMError(f"model returned no JSON for {schema.__name__}")
 
     # ------------------------------------------------------------------ #
 

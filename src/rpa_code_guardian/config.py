@@ -56,6 +56,13 @@ class Settings(BaseSettings):
         alias="GUARDIAN_REQUEST_TIMEOUT",
         description="HTTP timeout in seconds for each LLM call (local models can be slow).",
     )
+    max_tokens: int = Field(
+        default=8192,
+        alias="GUARDIAN_MAX_TOKENS",
+        description="Max completion tokens per call. Reasoning models (e.g. gpt-oss) "
+        "spend tokens thinking before answering; too low a budget truncates the JSON "
+        "output and validation fails. Raise it if summaries still come back truncated.",
+    )
 
     # --- Pipeline limits ---
     max_concurrency: int = Field(
