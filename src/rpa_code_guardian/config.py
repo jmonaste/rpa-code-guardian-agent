@@ -45,6 +45,17 @@ class Settings(BaseSettings):
         alias="GUARDIAN_TEMPERATURE",
         description="Sampling temperature (keep 0 for reproducible documents).",
     )
+    verify_ssl: bool = Field(
+        default=True,
+        alias="GUARDIAN_VERIFY_SSL",
+        description="Verify the endpoint's TLS certificate. Set false only for a "
+        "trusted local/corporate endpoint with a self-signed certificate.",
+    )
+    request_timeout: float = Field(
+        default=120.0,
+        alias="GUARDIAN_REQUEST_TIMEOUT",
+        description="HTTP timeout in seconds for each LLM call (local models can be slow).",
+    )
 
     # --- Pipeline limits ---
     max_concurrency: int = Field(

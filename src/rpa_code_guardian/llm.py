@@ -18,6 +18,7 @@ import json
 import re
 from typing import TypeVar
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, ValidationError
 
@@ -48,11 +49,16 @@ class GuardianLLM:
                 if role == "worker"
                 else self.settings.resolved_lead_model()
             )
+            http_client = httpx.Client(
+                verify=self.settings.verify_ssl,
+                timeout=self.settings.request_timeout,
+            )
             self._models[role] = ChatOpenAI(
                 model=model_name,
                 base_url=self.settings.openai_base_url,
                 api_key=self.settings.openai_api_key,
                 temperature=self.settings.temperature,
+                http_client=http_client,
             )
         return self._models[role]
 
