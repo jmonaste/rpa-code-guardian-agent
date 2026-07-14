@@ -58,6 +58,7 @@ class GuardianLLM:
                 base_url=self.settings.openai_base_url,
                 api_key=self.settings.openai_api_key,
                 temperature=self.settings.temperature,
+                max_tokens=self.settings.max_tokens,
                 http_client=http_client,
             )
         return self._models[role]
