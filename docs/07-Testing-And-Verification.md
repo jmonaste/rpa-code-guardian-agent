@@ -1,8 +1,9 @@
 # 07 — Testing and verification
 
-The suite (18 tests, `pytest`, < 2 s, zero network) runs the entire pipeline —
-graph, waves, cache, tools, rendering — against a bundled miniature
-REFramework project with a scripted fake model. Source: `tests/`.
+The suite (61 tests, `pytest`, < 3 s, zero network) runs the entire pipeline —
+graph, waves, cache, tools, rendering, gateway resilience, verification
+passes, CLI and the tune utility — against a bundled miniature REFramework
+project with a scripted fake model. Source: `tests/`.
 
 ## The two enabling pieces
 
@@ -17,7 +18,9 @@ methods (ch. 05):
   boilerplate, and attaches a smell only to `ExtractInvoice`. The fake
   narrative asks one `open_question` on the first call and none on the second
   — which is precisely what drives the gap-fill + refine path through the
-  graph.
+  graph. The fake `NarrativeAudit` reports no unsupported claims, so the
+  critic node passes through quietly in end-to-end runs; the critic's own
+  behavior is exercised in `test_agentic.py` with targeted fakes.
 - `tool_loop()` actually **invokes the real tools** it is handed
   (`search_project`, then `read_workflow` on `GetTransactionData.xaml`) before
   answering. This is what lets tests assert that evidence recording works end
@@ -81,6 +84,32 @@ negative to find.
   3. *Cache*: run twice against a tmp copy; the second run performs **zero**
      additional `WorkflowSummary` calls (probed via the fake's call counter)
      and the cache file exists on disk.
+- **`test_llm.py`** — the gateway in isolation, with stub runners:
+  `_is_retryable` classification (429/5xx/timeout matched, validation errors
+  not, cause chains walked), backoff retry then success, exhaustion raising
+  `GuardianLLMUnavailable`, non-retryable errors propagating on the first
+  attempt, retries emitting reviewable log records, a dead transport aborting
+  the method ladder at the first rung, the tolerant JSON fallback recovering
+  wrapped / reasoning-prefixed / schema-echo outputs, and `LLMCallStats`
+  semantics (ok/retried/failed counts, non-transport errors ignored, a broken
+  observer never breaking a call).
+- **`test_agentic.py`** — the D11 verification passes, each with its negative
+  case: the critic warns on nonexistent cited paths (and not on real ones) and
+  turns unsupported claims into open questions; a refuted smell is dropped
+  while ambiguous answers are kept and the disable flag prevents any tool
+  loop; a weak worker summary escalates to the lead exactly once while
+  boilerplate never escalates; a compliant verdict citing an invented path is
+  rescued with recorder evidence while a well-evidenced one is left alone.
+- **`test_cli.py`** — the `analyze` command against a stubbed pipeline:
+  progress lines (waves, analyzed/total, per-severity findings counts), the
+  live `llm:` counter and its final-summary echo, log-level validation, and
+  `_setup_logging` routing full-detail records to a file while filtering the
+  console.
+- **`test_tune.py`** — the tuning utility: the concurrency recommendation
+  walks improving/dirty/empty sweeps correctly, the sweep measures levels and
+  counts errors through a stub gateway, per-method probe reporting, a model
+  shared by both slots is probed once, an unreachable endpoint short-circuits,
+  and the CLI renders the report and validates `--levels`.
 
 ## Verification beyond the suite
 
@@ -106,12 +135,18 @@ endpoint — the checklist for it:
 
 1. `pip install -e .`, copy `.env.example` -> `.env`, set the endpoint + both
    model slots.
-2. Run against a small real project first; check the `warnings` block in the
-   document appendix — structured-output fallbacks (`... fell back ...`)
-   appearing frequently means the worker model needs the JSON fallback tuned
-   or a different model slot.
-3. Then a large project: watch wall-clock vs `GUARDIAN_MAX_CONCURRENCY`, try
-   killing the run mid-map and resuming with `--resume`.
-4. Then a real PDD: inspect which requirements land `Not verifiable` — that is
+2. **Run `rpa-guardian tune` first.** It probes connectivity, which
+   structured-output method each model actually supports, whether
+   `GUARDIAN_MAX_TOKENS` truncates, and sweeps concurrency levels — ending in
+   a recommended `.env` block. This replaces most of the old guesswork.
+3. Run against a small real project; watch the live `llm:` counter and check
+   the `warnings` block in the document appendix — structured-output
+   fallbacks (`... fell back ...`) appearing frequently means the worker
+   model needs a different slot, and `--log-level debug` (or `--log-file`)
+   shows which ladder rung served each call.
+4. Then a large project: watch wall-clock vs `GUARDIAN_MAX_CONCURRENCY` and
+   the retried/failed counters, try killing the run mid-map and resuming with
+   `--resume`.
+5. Then a real PDD: inspect which requirements land `Not verifiable` — that is
    the signal for whether word-overlap relevance selection is good enough
    (decision D2's revisit trigger).

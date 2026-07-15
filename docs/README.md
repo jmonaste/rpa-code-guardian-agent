@@ -11,9 +11,9 @@ justified. Read in order the first time; each chapter also stands alone.
 | 02 | [Pipeline architecture](02-Pipeline-Architecture.md) | The LangGraph graph: state, reducers, every node, the wave loop, control flow, concurrency, checkpointing. |
 | 03 | [XAML ingestion](03-XAML-Ingestion.md) | Anatomy of UiPath XAML, what is noise vs signal, how the parser builds the IR, the call graph, the REFramework fingerprint, Config.xlsx and log digestion. |
 | 04 | [Context engineering](04-Context-Engineering.md) | How the agent handles projects of any size: the compress / isolate / write / select levers mapped to concrete code, and every context budget in the system. |
-| 05 | [LLM gateway](05-LLM-Gateway.md) | The single point of contact with the model: structured output over tool calling, the retry ladder, the JSON fallback, the tool loop, and local-model quirks. |
-| 06 | [Compliance subgraph](06-Compliance-Subgraph.md) | PDD requirement extraction, per-requirement isolated verification, the evidence-rescue agent, and the traceability matrix. |
-| 07 | [Testing and verification](07-Testing-And-Verification.md) | The injectable fake LLM, what each fixture file exercises, what each test proves, and the smoke run against the official REFramework. |
+| 05 | [LLM gateway](05-LLM-Gateway.md) | The single point of contact with the model: the structured-output method ladder, the tolerant JSON fallback, exponential-backoff retries, live call stats, the tool loop, and local-model quirks. |
+| 06 | [Compliance subgraph](06-Compliance-Subgraph.md) | PDD requirement extraction, per-requirement isolated verification, the evidence-rescue agent, evidence-citation validation, and the traceability matrix. |
+| 07 | [Testing and verification](07-Testing-And-Verification.md) | The injectable fake LLM, what each fixture file exercises, what each test file proves (pipeline, gateway, verification passes, CLI, tune), and the endpoint validation checklist. |
 | 08 | [References](08-References.md) | Annotated links to the primary documentation of every technology and technique used. |
 
 ## The system in one diagram
@@ -38,14 +38,17 @@ justified. Read in order the first time; each chapter also stands alone.
  reduce        LLM (lead): narrative sections from summaries only
     |
     v
- findings      deterministic: static checks + LLM smells, deduped, ranked
-    |
+ critic        LLM (lead) + deterministic: grounding audit — cited paths
+    |          must exist; unsupported claims become open questions
+    v
+ findings      deterministic + LLM skeptics: static checks + smells that
+    |          survive adversarial verification, deduped, ranked
     v
  gapfill       LLM agent (lead): bounded tool loop answers the narrative's
     |          open questions; evidence recorded from actual tool reads
     v
- compose       deterministic: Markdown skeleton, tables, Mermaid, lint
-    |
+ compose       deterministic: Markdown skeleton, tables, Mermaid, prose
+    |          normalization, lint
     +--(no PDD)--> END
     |
     +--(PDD given)--> extract_requirements -> dispatch_verify
@@ -54,20 +57,28 @@ justified. Read in order the first time; each chapter also stands alone.
                       verify_requirement (parallel, worker)
                           |
                           v
-                      evidence_rescue (lead, tool loop for 'Not verifiable')
-                          |
+                      evidence_rescue (lead, tool loop for 'Not verifiable'
+                          |            and unevidenced compliant verdicts)
                           v
                       compose_compliance -> END
 ```
+
+The map phase also escalates weak worker summaries to the lead model, and
+every LLM call flows through one gateway with a structured-output method
+ladder, exponential-backoff retries and live ok/retried/failed counters
+(ch. 05). `rpa-guardian tune` probes the endpoint on demand and recommends
+`.env` values.
 
 ## Source map
 
 ```
 src/rpa_code_guardian/
   config.py            Settings (pydantic-settings), cache_dir()
-  llm.py               GuardianLLM: structured(), tool_loop()          -> ch. 05
+  llm.py               GuardianLLM: structured() ladder, retry/backoff,
+                       LLMCallStats, tool_loop()                       -> ch. 05
   checks.py            run_checks(): deterministic findings            -> ch. 03
   tools.py             build_project_tools(): bounded read-only tools  -> ch. 04, 06
+  tune.py              endpoint probes + parameter recommendation      -> ch. 05, 07
   ingest/
     scanner.py         scan_project(), build_call_graph(), fingerprint -> ch. 03
     xaml_parser.py     parse_xaml(), _OutlineWalker                    -> ch. 03
@@ -79,13 +90,16 @@ src/rpa_code_guardian/
     summaries.py       LLM structured-output schemas                   -> ch. 05
   graph/
     state.py           GuardianState, reducers, Send payloads          -> ch. 02
-    nodes.py           PipelineNodes: main pipeline nodes + prompts    -> ch. 02, 04
-    compliance.py      ComplianceNodes                                 -> ch. 06
+    nodes.py           PipelineNodes: pipeline nodes + prompts, incl.
+                       critic + smell verification + escalation        -> ch. 02, 04
+    compliance.py      ComplianceNodes (+ widened evidence rescue)     -> ch. 06
     builder.py         build_graph(), run_pipeline(), checkpointer     -> ch. 02
     cache.py           SummaryCache (content-hash disk cache)          -> ch. 04
   render/
-    document.py        render_documentation(), render_compliance()    -> ch. 02
-    lint.py            lint_markdown(), md_cell(), md_anchor()         -> ch. 02
-  cli.py               typer entry point (rpa-guardian analyze)
+    document.py        render_documentation(), render_compliance(),
+                       evidence-citation filtering                     -> ch. 02, 06
+    lint.py            lint_markdown(), normalize_prose(), md_cell()   -> ch. 02
+  cli.py               typer entry point (rpa-guardian analyze / tune):
+                       logging setup, live progress + llm counters
 tests/                                                                 -> ch. 07
 ```

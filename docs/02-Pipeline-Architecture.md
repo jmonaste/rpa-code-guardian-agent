@@ -17,7 +17,9 @@ a LangGraph `StateGraph` for three properties that a script does not give:
    attached, every super-step is durable; `--resume` continues a crashed run.
 3. **Observability.** `graph.stream(..., stream_mode="updates")` yields one
    event per node execution — the CLI progress display is just a consumer of
-   that stream.
+   that stream (plus a second live channel: the gateway's `LLMCallStats`
+   observer ticks the `llm: N ok` counter from worker threads as endpoint
+   calls complete, ch. 05).
 
 ## State
 
@@ -61,7 +63,7 @@ START -> ingest -> plan -> dispatch
 dispatch --route_map--> [Send("summarize", p) ...]   # wave not empty
                           summarize -> dispatch       # loop
 dispatch --route_map--> reduce                        # waves exhausted
-reduce -> findings -> gapfill -> compose
+reduce -> critic -> findings -> gapfill -> compose
 compose --route_compliance--> extract_requirements   # pdd_text present
 compose --route_compliance--> END                     # no PDD
 extract_requirements -> dispatch_verify
@@ -126,6 +128,11 @@ for the whole. Fallback (D7): a generic plan + warning.
 Described above. `summarize` details worth reading in code:
 
 - Cache check happens *before* any prompt is built (`cache.get(content_hash)`).
+- **Quality-gate escalation** (`_escalate_if_weak`, D11): a worker answer with
+  a sub-40-char purpose or empty key logic on a non-boilerplate workflow is
+  retried once with the lead model over the same prompt; the better answer
+  wins. Skipped when both slots resolve to the same model or
+  `GUARDIAN_ESCALATE_WEAK_SUMMARIES` is off.
 - `summary.path` is overwritten with the payload's path after the call — the
   model is asked to copy it, but never trusted (same philosophy as D8).
 - A missing `one_liner` is synthesized from the first sentence of `purpose`,
@@ -141,11 +148,27 @@ up to 5 things the model could *not* determine from summaries, which is the
 explicit hand-off contract to the gap-fill agent (the model is told to ask
 instead of guessing).
 
-### `findings` (deterministic)
+### `critic` (LLM lead + deterministic)
+
+Grounding audit of the draft narrative (D11), in two layers. Deterministic:
+every `*.xaml` path the prose cites is checked against the inventory;
+nonexistent citations become warnings. Agentic (`GUARDIAN_AUDIT_NARRATIVE`):
+one lead call returns a `NarrativeAudit` — factual claims the summaries do
+not support — and each claim is appended to `narrative.open_questions`, so
+the *existing* gap-fill agent verifies it against the project before the
+document is composed. Fallback (D7): audit failure is a warning, never an
+abort.
+
+### `findings` (deterministic + LLM skeptics)
 
 Merges `checks.run_checks(inventory)` (static rules, ch. 03) with the `smells`
 collected by every workflow summary, dedupes on `(location, description)`,
-and sorts High > Medium > Low.
+and sorts High > Medium > Low. Before a smell becomes a finding it must
+survive adversarial verification (`_verify_smells`, D11,
+`GUARDIAN_VERIFY_SMELLS`): a short skeptic tool-loop (4 iterations, capped at
+12 smells per run) must answer `CONFIRMED:` or `REFUTED:` from actual reads of
+the project. Refuted smells are dropped with a warning noting the count;
+ambiguity, verification failure or the cost cap keep the smell — fail open.
 
 ### `gapfill` (LLM agent, lead)
 
@@ -163,15 +186,21 @@ less integrated.
 tables, the Mermaid invocation graph (capped at 60 edges; larger graphs are
 reduced to the entry point's depth-2 neighborhood), boilerplate workflows
 collapsed into a single table, and the appendix (coverage stats, verified
-clarifications, warnings). `render/lint.py` then strips emoji/pictograph
+clarifications, warnings). Model-written prose passes
+`render/lint.py: normalize_prose` first — a wrapping ```` ```markdown ````
+fence is stripped, stray headings are demoted below the document's own
+`###` subsections (relative depth preserved), odd bullets normalized, and
+the blank lines block elements need are inserted, all fence-aware so real
+code blocks stay untouched. `lint_markdown` then strips emoji/pictograph
 ranges and normalizes blank lines — the style guarantee of D4.
 
 ### Compliance nodes
 
 Ch. 06. Structurally: `extract_requirements` (chunked extraction) →
 `dispatch_verify` (one isolated `VerifyPayload` per requirement) → parallel
-`verify_requirement` → `evidence_rescue` (bounded tool loops for the
-`Not verifiable` subset) → `compose_compliance`.
+`verify_requirement` → `evidence_rescue` (bounded tool loops for
+`Not verifiable` verdicts and for compliant verdicts whose cited evidence
+fails validation) → `compose_compliance`.
 
 ## `run_pipeline` and persistence
 

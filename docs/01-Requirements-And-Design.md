@@ -216,6 +216,46 @@ hand-built because the pipeline is a static workflow with one dynamic fan-out,
 not an open-ended agent loop; explicit nodes and edges are easier to test,
 checkpoint and reason about than a prebuilt agent abstraction.
 
+### D11 — Unverified model output never ships
+
+**Decision.** Model output that would land in a deliverable passes a
+verification layer first, each part independently switchable in settings:
+a *critic* pass audits the narrative for claims the summaries do not support
+(they become gap-fill questions) and for cited workflow paths that do not
+exist; every model-reported code smell must survive an adversarial skeptic
+tool-loop (CONFIRM or REFUTE from actual reads) before becoming a finding;
+compliance evidence citations are validated against the inventory, and
+compliant verdicts whose evidence fails validation are re-checked by the
+rescue agent. A cheap quality gate also retries weak worker summaries with
+the lead model.
+
+**Why.** D7 handles the model *failing*; D11 handles the model *succeeding
+convincingly and being wrong* — the dangerous case for an audit deliverable.
+Local models invent paths, overstate smells and claim compliance without
+grounds; verification converts each of those from a silent error into either
+a corrected statement or an explicit warning. Fail-open everywhere: when a
+verification pass itself fails, the original content is kept — losing a real
+issue is worse than keeping a doubtful one.
+
+### D12 — The gateway absorbs endpoint flakiness
+
+**Decision.** All transport robustness lives in `GuardianLLM`: structured
+output negotiates a method ladder (guided JSON → tool calling → tolerant
+plain-JSON parsing); transient endpoint errors (429, 502/503/504, timeouts)
+are retried with exponential backoff (`GUARDIAN_LLM_RETRIES`,
+`GUARDIAN_LLM_RETRY_BASE_DELAY`); a dead endpoint raises
+`GuardianLLMUnavailable`, which aborts the ladder instead of burning more
+calls; and every call outcome feeds thread-safe live counters
+(`LLMCallStats`) that the CLI renders in real time. The `rpa-guardian tune`
+command probes all of this against the configured endpoint on demand.
+
+**Why.** Local endpoints under parallel load produce 429s and gateway
+timeouts routinely; handled per-node this would be scattered try/except and
+lost summaries, handled in the gateway it is one policy every call inherits.
+The distinction between "the endpoint answered something unusable" (fall down
+the ladder) and "the transport is dead" (stop trying) is what keeps a flaky
+run slow-but-complete and a dead-endpoint run fast-failing instead of hanging.
+
 ## What was deliberately left out (v0.1)
 
 - **PDD in .docx/.pdf** — the PDD is accepted as Markdown/text only; document
