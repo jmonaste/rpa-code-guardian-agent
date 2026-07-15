@@ -97,6 +97,26 @@ class Settings(BaseSettings):
         description="Reuse cached per-workflow summaries when the file has not changed.",
     )
 
+    # --- Agentic verification passes ---
+    audit_narrative: bool = Field(
+        default=True,
+        alias="GUARDIAN_AUDIT_NARRATIVE",
+        description="Run a critic pass over the narrative: unsupported claims are "
+        "turned into open questions for the gap-fill agent (one extra lead call).",
+    )
+    verify_smells: bool = Field(
+        default=True,
+        alias="GUARDIAN_VERIFY_SMELLS",
+        description="Adversarially verify model-reported code smells with the project "
+        "tools before they become findings; unconfirmed smells are dropped.",
+    )
+    escalate_weak_summaries: bool = Field(
+        default=True,
+        alias="GUARDIAN_ESCALATE_WEAK_SUMMARIES",
+        description="Retry a workflow summary with the lead model when the worker's "
+        "output fails a cheap quality gate (empty key logic, generic purpose).",
+    )
+
     def resolved_worker_model(self) -> str:
         return self.worker_model or self.lead_model or "gpt-oss"
 

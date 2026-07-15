@@ -11,6 +11,7 @@ deterministic fallback and records a warning instead of failing the run.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from langgraph.graph import END
@@ -25,6 +26,7 @@ from ..model.summaries import (
     AnalysisPlan,
     Finding,
     GapAnswer,
+    NarrativeAudit,
     NarrativeSections,
     WorkflowSummary,
 )
@@ -35,6 +37,11 @@ from .state import GuardianState, MapPayload
 
 NARRATIVE_CONTEXT_BUDGET = 28_000  # chars of workflow summaries shown to the reduce node
 MAX_GAP_QUESTIONS = 5
+MAX_SMELL_CHECKS = 12  # adversarial verification loops per run (cost bound)
+SMELL_LOOP_ITERATIONS = 4
+MIN_PURPOSE_CHARS = 40  # quality gate: shorter purposes look like non-answers
+
+_XAML_CITE_RE = re.compile(r"[\w][\w\-./\\]*\.xaml", re.IGNORECASE)
 
 PLAN_SYSTEM = """\
 You are a senior RPA architect. You are given the inventory of a UiPath project
@@ -66,6 +73,22 @@ read-only tools. Explore selectively: search first, then read only what is
 needed. Ground the answer strictly in what the tools return; if the project
 does not contain the answer, say so plainly. Answer in 2-5 sentences of
 professional English prose."""
+
+CRITIC_SYSTEM = """\
+You are auditing the draft documentation of a UiPath process for grounding.
+You are given the workflow summaries (the only source of truth) and the draft
+sections. List every factual claim in the sections that is NOT supported by the
+summaries: invented systems, invented behavior, numbers or rules that appear
+nowhere. Report at most 5, each as one precise sentence quoting the claim. If
+everything is grounded, return an empty list. Audit factual support only, not
+style or completeness."""
+
+SMELL_VERIFY_SYSTEM = """\
+You are skeptically verifying one reported code-quality issue in a UiPath
+project. Use the read-only tools to inspect the workflow in question. Then
+answer with exactly one line starting with either CONFIRMED: or REFUTED:,
+followed by a one-sentence justification grounded in what you actually read.
+If the tools do not show enough evidence to confirm the issue, answer REFUTED."""
 
 REFINE_SYSTEM = """\
 You are revising the sections of a technical document about a UiPath process.
@@ -185,12 +208,35 @@ class PipelineNodes:
                 one_liner="(analysis unavailable)",
             )
             return {"summaries": {path: summary}, "warnings": [f"summary failed for {path}: {exc}"]}
+        summary = self._escalate_if_weak(summary, user)
         summary.path = path  # canonical, never trusted from the model
         if not summary.one_liner:
             summary.one_liner = summary.purpose.split(". ")[0][:140]
         if self.cache is not None:
             self.cache.put(payload["content_hash"], summary)
         return {"summaries": {path: summary}}
+
+    def _weak_summary(self, summary: WorkflowSummary) -> bool:
+        """Cheap quality gate: a real workflow should yield substance."""
+        if summary.is_boilerplate:
+            return False
+        return len(summary.purpose.strip()) < MIN_PURPOSE_CHARS or not summary.key_logic
+
+    def _escalate_if_weak(self, summary: WorkflowSummary, user: str) -> WorkflowSummary:
+        """Retry a weak worker summary with the lead model (pay for quality only
+        where the cheap model failed). Keeps the worker's answer if the lead's is
+        no better or the retry fails."""
+        if (
+            not self.settings.escalate_weak_summaries
+            or not self._weak_summary(summary)
+            or self.settings.resolved_lead_model() == self.settings.resolved_worker_model()
+        ):
+            return summary
+        try:
+            retry = self.llm.structured(WorkflowSummary, MAP_SYSTEM, user, role="lead")
+        except Exception:  # noqa: BLE001 - keep the worker summary
+            return summary
+        return retry if not self._weak_summary(retry) else summary
 
     # ---------------------------------------------------------------- reduce
 
@@ -274,6 +320,60 @@ class PipelineNodes:
             exception_strategy="See the per-workflow reference below.",
         )
 
+    # ---------------------------------------------------------------- critic
+
+    def critic(self, state: GuardianState) -> dict:
+        """Grounding audit of the draft narrative.
+
+        Deterministic layer: every workflow path the prose cites must exist in
+        the inventory. Agentic layer: a lead-model pass lists factual claims the
+        summaries do not support; those become open questions so the existing
+        gap-fill agent verifies them against the project before the document is
+        composed.
+        """
+        narrative = state.get("narrative")
+        if narrative is None:
+            return {}
+        inv = state["inventory"]
+        warnings: list[str] = []
+
+        prose = "\n".join(
+            (
+                narrative.executive_summary, narrative.process_description,
+                narrative.architecture, narrative.exception_strategy,
+                narrative.logging_observability, narrative.external_systems,
+            )
+        )
+        known = {p.lower() for p in inv.workflows}
+        for cited in sorted({m.group(0) for m in _XAML_CITE_RE.finditer(prose)}):
+            if cited.replace("\\", "/").lower() not in known:
+                warnings.append(f"narrative cites nonexistent workflow: {cited}")
+
+        if not self.settings.audit_narrative:
+            return {"warnings": warnings} if warnings else {}
+
+        user = (
+            f"WORKFLOW SUMMARIES:\n{self._summaries_context(state)}\n\n"
+            f"DRAFT SECTIONS:\n{narrative.model_dump_json(indent=1)}"
+        )
+        try:
+            audit = self.llm.structured(NarrativeAudit, CRITIC_SYSTEM, user, role="lead")
+        except Exception as exc:  # noqa: BLE001 - degrade, don't fail the run
+            warnings.append(f"narrative audit skipped: {exc}")
+            return {"warnings": warnings} if warnings else {}
+
+        if audit.unsupported_claims:
+            existing = set(narrative.open_questions)
+            for claim in audit.unsupported_claims[:MAX_GAP_QUESTIONS]:
+                question = f"Verify or correct this draft statement against the project: {claim}"
+                if question not in existing:
+                    narrative.open_questions.append(question)
+            warnings.append(
+                f"narrative audit flagged {len(audit.unsupported_claims)} unsupported claim(s) for gap-fill"
+            )
+            return {"narrative": narrative, "warnings": warnings}
+        return {"warnings": warnings} if warnings else {}
+
     # -------------------------------------------------------------- gap fill
 
     def gapfill(self, state: GuardianState) -> dict:
@@ -313,24 +413,74 @@ class PipelineNodes:
         inv = state["inventory"]
         results = run_checks(inv)
         seen = {(f.location, f.description[:60]) for f in results}
+        candidates: list[tuple[str, str]] = []
         for path, summary in sorted(state.get("summaries", {}).items()):
             for smell in summary.smells:
                 key = (path, smell[:60])
                 if key in seen:
                     continue
                 seen.add(key)
-                results.append(
-                    Finding(
-                        severity="Medium",
-                        category="Code quality",
-                        location=path,
-                        description=smell,
-                        recommendation="Review and address as part of routine maintenance.",
-                    )
+                candidates.append((path, smell))
+        kept, warnings = self._verify_smells(inv, candidates)
+        for path, smell in kept:
+            results.append(
+                Finding(
+                    severity="Medium",
+                    category="Code quality",
+                    location=path,
+                    description=smell,
+                    recommendation="Review and address as part of routine maintenance.",
                 )
+            )
         order = {"High": 0, "Medium": 1, "Low": 2}
         results.sort(key=lambda f: (order.get(f.severity, 3), f.location))
-        return {"findings": results}
+        out: dict = {"findings": results}
+        if warnings:
+            out["warnings"] = warnings
+        return out
+
+    def _verify_smells(
+        self, inv: ProjectInventory, candidates: list[tuple[str, str]]
+    ) -> tuple[list[tuple[str, str]], list[str]]:
+        """Adversarially verify model-reported smells before they become findings.
+
+        Each smell gets one short skeptic tool-loop that must CONFIRM or REFUTE
+        it from actual reads. Refuted smells are dropped (the model invented or
+        overstated them); on any ambiguity or verification failure the smell is
+        kept — losing a real issue is worse than keeping a doubtful one.
+        """
+        if not self.settings.verify_smells or not candidates:
+            return candidates, []
+        kept: list[tuple[str, str]] = []
+        warnings: list[str] = []
+        dropped = 0
+        for path, smell in candidates[:MAX_SMELL_CHECKS]:
+            tools = build_project_tools(inv, None, self.settings.ir_max_chars)
+            try:
+                answer, _ = self.llm.tool_loop(
+                    SMELL_VERIFY_SYSTEM,
+                    f"Reported issue in workflow {path}: {smell}",
+                    tools,
+                    role="worker",
+                    max_iterations=SMELL_LOOP_ITERATIONS,
+                )
+            except Exception as exc:  # noqa: BLE001 - fail open
+                kept.append((path, smell))
+                warnings.append(f"smell verification unavailable for {path}: {exc}")
+                continue
+            text = answer.upper()
+            if "REFUTED" in text and "CONFIRMED" not in text:
+                dropped += 1
+            else:
+                kept.append((path, smell))
+        kept.extend(candidates[MAX_SMELL_CHECKS:])  # beyond the cost cap: keep unverified
+        if len(candidates) > MAX_SMELL_CHECKS:
+            warnings.append(
+                f"{len(candidates) - MAX_SMELL_CHECKS} smell(s) kept unverified (over the {MAX_SMELL_CHECKS}-check budget)"
+            )
+        if dropped:
+            warnings.append(f"{dropped} unconfirmed code smell(s) dropped after adversarial verification")
+        return kept, warnings
 
     # --------------------------------------------------------------- compose
 
