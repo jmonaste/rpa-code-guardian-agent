@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
+from collections.abc import Callable
 from typing import TypeVar
 
 import httpx
@@ -125,11 +127,44 @@ def _error_summary(exc: BaseException | None) -> str:
     return re.sub(r"\s+", " ", text).strip()[:200]
 
 
+class LLMCallStats:
+    """Thread-safe counters of endpoint call outcomes, for live display.
+
+    ``ok``: the endpoint returned a completion. ``retried``: one transient
+    error (429/5xx/timeout) triggered a backoff retry. ``failed``: the
+    endpoint stayed down through every retry. Map-phase calls run in worker
+    threads, hence the lock; ``on_change`` receives a snapshot dict after
+    every update (callback errors are swallowed — display must never break
+    a run).
+    """
+
+    def __init__(self, on_change: Callable[[dict], None] | None = None) -> None:
+        self._lock = threading.Lock()
+        self.ok = 0
+        self.retried = 0
+        self.failed = 0
+        self.on_change = on_change
+
+    def record(self, kind: str) -> None:
+        with self._lock:
+            setattr(self, kind, getattr(self, kind) + 1)
+            snapshot = self.snapshot()
+        if self.on_change is not None:
+            try:
+                self.on_change(snapshot)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def snapshot(self) -> dict:
+        return {"ok": self.ok, "retried": self.retried, "failed": self.failed}
+
+
 class GuardianLLM:
     """Two model slots (worker/lead) over one OpenAI-compatible endpoint."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, stats: LLMCallStats | None = None) -> None:
         self.settings = settings
+        self.stats = stats or LLMCallStats()
         self._models: dict[str, object] = {}
 
     def _chat_model(self, role: str):
@@ -175,9 +210,12 @@ class GuardianLLM:
                     "LLM call ok in %.1fs (attempt %d/%d)",
                     time.perf_counter() - started, attempt + 1, retries + 1,
                 )
+                self.stats.record("ok")
                 return result
             except Exception as exc:  # noqa: BLE001 - classified below
                 if not _is_retryable(exc):
+                    # The endpoint answered; the content was unusable (e.g. a
+                    # validation error). Not a transport failure: don't count it.
                     logger.debug(
                         "LLM call failed with non-retryable error after %.1fs: %s",
                         time.perf_counter() - started, _error_summary(exc),
@@ -189,8 +227,10 @@ class GuardianLLM:
                         "transient endpoint error (attempt %d/%d), retrying in %.0fs: %s",
                         attempt + 1, retries + 1, delay, _error_summary(exc),
                     )
+                    self.stats.record("retried")
                     time.sleep(delay)
                     delay = min(delay * 2, 60.0)
+        self.stats.record("failed")
         logger.error("giving up after %d attempts: %s", retries + 1, _error_summary(last))
         raise GuardianLLMUnavailable(
             f"endpoint still failing after {retries + 1} attempts: {_error_summary(last)}"

@@ -3,7 +3,7 @@
 Graph shape:
 
     START -> ingest -> plan -> dispatch --(Send per workflow)--> summarize -> dispatch
-                                  \\--(waves done)--> reduce -> findings -> gapfill -> compose
+                                  \\--(waves done)--> reduce -> critic -> findings -> gapfill -> compose
     compose --(PDD given)--> extract_requirements -> dispatch_verify
         --(Send per requirement)--> verify_requirement -> evidence_rescue -> compose_compliance -> END
     compose --(no PDD)--> END
@@ -35,6 +35,7 @@ def build_graph(settings: Settings, llm: GuardianLLM | None = None, checkpointer
     builder.add_node("dispatch", nodes.dispatch)
     builder.add_node("summarize", nodes.summarize)
     builder.add_node("reduce", nodes.reduce)
+    builder.add_node("critic", nodes.critic)
     builder.add_node("findings", nodes.findings)
     builder.add_node("gapfill", nodes.gapfill)
     builder.add_node("compose", nodes.compose)
@@ -49,7 +50,8 @@ def build_graph(settings: Settings, llm: GuardianLLM | None = None, checkpointer
     builder.add_edge("plan", "dispatch")
     builder.add_conditional_edges("dispatch", nodes.route_map, ["summarize", "reduce"])
     builder.add_edge("summarize", "dispatch")
-    builder.add_edge("reduce", "findings")
+    builder.add_edge("reduce", "critic")
+    builder.add_edge("critic", "findings")
     builder.add_edge("findings", "gapfill")
     builder.add_edge("gapfill", "compose")
     builder.add_conditional_edges("compose", nodes.route_compliance, ["extract_requirements", END])

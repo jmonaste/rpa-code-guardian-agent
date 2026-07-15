@@ -14,7 +14,7 @@ import re
 from langgraph.types import Send
 
 from ..model.summaries import ComplianceItem, GapAnswer, Requirement, RequirementList
-from ..render.document import render_compliance
+from ..render.document import _filter_evidence, render_compliance
 from ..tools import build_project_tools
 from .nodes import PipelineNodes
 from .state import GuardianState, VerifyPayload
@@ -155,14 +155,28 @@ class ComplianceNodes:
     # ----------------------------------------------------- evidence rescue
 
     def evidence_rescue(self, state: GuardianState) -> dict:
-        """Give 'Not verifiable' verdicts one bounded agentic evidence pass."""
+        """One bounded agentic evidence pass for verdicts that need it.
+
+        Rescued verdicts: 'Not verifiable' (the original behavior), plus any
+        compliant verdict whose cited evidence does not survive validation
+        against the inventory — a claim of compliance backed by nothing (or by
+        an invented path) is exactly the hallucination an audit must not ship.
+        """
+        inv = state["inventory"]
+
+        def needs_rescue(item: ComplianceItem) -> bool:
+            if item.verdict == "Not verifiable":
+                return True
+            return item.verdict in ("Compliant", "Partially compliant") and not _filter_evidence(
+                inv, item.evidence
+            )
+
         pending = [
             (rid, item) for rid, item in sorted(state.get("compliance", {}).items())
-            if item.verdict == "Not verifiable"
+            if needs_rescue(item)
         ][:MAX_REQUIREMENTS]
         if not pending:
             return {}
-        inv = state["inventory"]
         reqs = {r.id: r for r in state.get("requirements", [])}
         updates: dict[str, ComplianceItem] = {}
         answers: list[GapAnswer] = []

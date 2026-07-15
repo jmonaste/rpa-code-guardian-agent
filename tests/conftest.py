@@ -11,6 +11,7 @@ from rpa_code_guardian.llm import GuardianLLM
 from rpa_code_guardian.model.summaries import (
     AnalysisPlan,
     ComplianceItem,
+    NarrativeAudit,
     NarrativeSections,
     Requirement,
     RequirementList,
@@ -85,6 +86,8 @@ class FakeGuardianLLM(GuardianLLM):
                 external_systems="The invoicing web application is accessed through Chrome.",
                 open_questions=["Which queue name is actually used?"] if self.narrative_round == 1 else [],
             )
+        if schema is NarrativeAudit:
+            return NarrativeAudit(unsupported_claims=[])
         if schema is RequirementList:
             return RequirementList(
                 requirements=[

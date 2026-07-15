@@ -11,6 +11,7 @@ from rpa_code_guardian.config import Settings
 from rpa_code_guardian.llm import (
     GuardianLLM,
     GuardianLLMUnavailable,
+    LLMCallStats,
     _error_summary,
     _is_retryable,
 )
@@ -103,6 +104,36 @@ def test_retries_emit_reviewable_log_records(fast_llm):
         lg.setLevel(old_level)
     assert any("retrying in" in m for m in records)
     assert any("LLM call ok" in m for m in records)
+
+
+def test_stats_count_ok_retries_and_failures(monkeypatch):
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+    snapshots: list[dict] = []
+    settings = Settings(_env_file=None, GUARDIAN_LLM_RETRIES=1, GUARDIAN_LLM_RETRY_BASE_DELAY=0.01)
+    llm = GuardianLLM(settings, stats=LLMCallStats(on_change=snapshots.append))
+
+    llm._invoke_with_retry(_Runner(1, RuntimeError("429 rate limit")), [])  # retry then ok
+    with pytest.raises(GuardianLLMUnavailable):
+        llm._invoke_with_retry(_Runner(99, RuntimeError("504 Gateway Time-out")), [])
+
+    assert llm.stats.snapshot() == {"ok": 1, "retried": 2, "failed": 1}
+    assert snapshots[-1] == {"ok": 1, "retried": 2, "failed": 1}  # observer saw every update
+    assert len(snapshots) == 4
+
+
+def test_stats_ignore_non_transport_errors(fast_llm):
+    with pytest.raises(ValueError):
+        fast_llm._invoke_with_retry(_Runner(99, ValueError("validation error")), [])
+    # The endpoint answered (unusable content is not a transport failure).
+    assert fast_llm.stats.snapshot() == {"ok": 0, "retried": 0, "failed": 0}
+
+
+def test_stats_callback_errors_never_break_a_call(fast_llm):
+    def broken(_snapshot: dict) -> None:
+        raise RuntimeError("display crashed")
+
+    fast_llm.stats.on_change = broken
+    assert fast_llm._invoke_with_retry(_Runner(0, RuntimeError("unused")), []) == "ok"
 
 
 class _StructStub:

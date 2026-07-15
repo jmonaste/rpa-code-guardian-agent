@@ -50,6 +50,17 @@ class NarrativeSections(BaseModel):
     )
 
 
+class NarrativeAudit(BaseModel):
+    """Output of the critic node: grounding check of the draft sections."""
+
+    unsupported_claims: list[str] = Field(
+        default_factory=list,
+        description="Factual claims in the draft that the workflow summaries do not "
+        "support (invented systems, behavior, numbers or rules), each as one precise "
+        "sentence. Empty if everything is grounded. At most 5.",
+    )
+
+
 class GapAnswer(BaseModel):
     """One resolved open question from the gap-fill agent."""
 
