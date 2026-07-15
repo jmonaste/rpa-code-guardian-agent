@@ -20,6 +20,9 @@ def test_analyze_reports_progress_and_writes_output(tmp_path, monkeypatch, sampl
     def fake_run_pipeline(project_root, settings, pdd_text="", llm=None, on_event=None, resume=False):
         on_event("ingest", {"inventory": inv, "waves": [["A.xaml"], ["B.xaml", "C.xaml"]], "warnings": []})
         on_event("plan", {"plan": None})
+        llm.stats.record("ok")  # live endpoint counter ticks from the gateway
+        llm.stats.record("ok")
+        llm.stats.record("retried")
         on_event("summarize", {"summaries": {}})
         on_event("summarize", {"summaries": {}})
         on_event("reduce", {})
@@ -40,11 +43,13 @@ def test_analyze_reports_progress_and_writes_output(tmp_path, monkeypatch, sampl
     assert result.exit_code == 0, result.output
     assert "3 to analyze in 2 waves" in result.output
     assert "2/3 workflows analyzed" in result.output
+    assert "2 ok" in result.output and "1 retried" in result.output  # live LLM counter
+    assert "2 llm calls ok, 1 retried" in result.output  # final summary
     assert "1 grounding issue(s) flagged" in result.output
     assert "1 issue(s) (1 high)" in result.output
     assert "nothing to verify" in result.output
     assert "one warning" in result.output
-    assert "3 workflows analyzed, 1 warning(s)" in result.output
+    assert "3 workflows analyzed, 2 llm calls ok, 1 retried, 1 warning(s)" in result.output
     doc = tmp_path / "ACME-InvoiceProcessing-Documentation.md"
     assert doc.read_text(encoding="utf-8") == "# Doc\n"
 

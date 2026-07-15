@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, Optional
@@ -72,6 +73,7 @@ def analyze(
 ) -> None:
     """Analyze a UiPath project and write Obsidian-ready documentation."""
     from .graph.builder import run_pipeline
+    from .llm import GuardianLLM, LLMCallStats
 
     if log_level.lower() not in _LOG_LEVELS:
         console.print(f"[red]Invalid log level:[/red] {log_level} (use one of: {', '.join(_LOG_LEVELS)})")
@@ -107,13 +109,39 @@ def analyze(
     done = {"summaries": 0, "verified": 0}
     totals = {"workflows": 0, "requirements": 0}
     progress = {"active": False}  # a \r progress line is on screen
+    phase = {"text": ""}  # current in-place phase text (map/verify progress)
+    llm_counts = {"ok": 0, "retried": 0, "failed": 0}
+    print_lock = threading.Lock()  # stats callbacks fire from map worker threads
+
+    def _llm_suffix() -> str:
+        parts = [f"[green]{llm_counts['ok']} ok[/green]"]
+        if llm_counts["retried"]:
+            parts.append(f"[yellow]{llm_counts['retried']} retried[/yellow]")
+        if llm_counts["failed"]:
+            parts.append(f"[red]{llm_counts['failed']} failed[/red]")
+        return "llm: " + ", ".join(parts)
+
+    def _progress_line() -> None:
+        """Redraw the in-place status line: current phase + live LLM counters."""
+        text = f"{phase['text']} · {_llm_suffix()}" if phase["text"] else _llm_suffix()
+        console.print(text, end="\r")
+        progress["active"] = True
 
     def _line(text: str) -> None:
         """Print a normal line, first closing any in-place progress line."""
-        if progress["active"]:
-            console.print("")
-            progress["active"] = False
-        console.print(text)
+        with print_lock:
+            if progress["active"]:
+                console.print("")
+                progress["active"] = False
+            phase["text"] = ""  # the stage that owned the progress line is over
+            console.print(text)
+
+    def on_stats(snapshot: dict) -> None:
+        with print_lock:
+            llm_counts.update(snapshot)
+            _progress_line()
+
+    llm = GuardianLLM(settings, stats=LLMCallStats(on_change=on_stats))
 
     def on_event(node: str, payload: object) -> None:
         data = payload if isinstance(payload, dict) else {}
@@ -129,10 +157,11 @@ def analyze(
                 )
             return
         if node == "summarize":
-            done["summaries"] += 1
-            total = f"/{totals['workflows']}" if totals["workflows"] else ""
-            console.print(f"[cyan]map[/cyan]: {done['summaries']}{total} workflows analyzed", end="\r")
-            progress["active"] = True
+            with print_lock:
+                done["summaries"] += 1
+                total = f"/{totals['workflows']}" if totals["workflows"] else ""
+                phase["text"] = f"[cyan]map[/cyan]: {done['summaries']}{total} workflows analyzed"
+                _progress_line()
             return
         if node == "critic":
             flagged = [w for w in data.get("warnings") or []]
@@ -161,10 +190,11 @@ def analyze(
             _line(f"[cyan]requirements[/cyan]: {totals['requirements']} extracted from the PDD")
             return
         if node == "verify_requirement":
-            done["verified"] += 1
-            total = f"/{totals['requirements']}" if totals["requirements"] else ""
-            console.print(f"[cyan]verify[/cyan]: {done['verified']}{total} requirements checked", end="\r")
-            progress["active"] = True
+            with print_lock:
+                done["verified"] += 1
+                total = f"/{totals['requirements']}" if totals["requirements"] else ""
+                phase["text"] = f"[cyan]verify[/cyan]: {done['verified']}{total} requirements checked"
+                _progress_line()
             return
         if node == "evidence_rescue":
             revised = data.get("compliance") or {}
@@ -183,6 +213,7 @@ def analyze(
             project_path.resolve(),
             settings,
             pdd_text=pdd_text,
+            llm=llm,
             on_event=on_event,
             resume=resume,
         )
@@ -216,9 +247,15 @@ def analyze(
         console.print(f"[yellow]warning:[/yellow] {warning}")
 
     analyzed = len(state.get("summaries") or {})
+    calls = llm.stats.snapshot()
+    call_detail = f"{calls['ok']} llm calls ok"
+    if calls["retried"]:
+        call_detail += f", {calls['retried']} retried"
+    if calls["failed"]:
+        call_detail += f", {calls['failed']} failed"
     console.print(
         f"[green]Done in {_fmt_duration(time.monotonic() - started)}[/green] — "
-        f"{analyzed} workflows analyzed, {len(warnings)} warning(s)"
+        f"{analyzed} workflows analyzed, {call_detail}, {len(warnings)} warning(s)"
     )
 
     if not doc_md:
