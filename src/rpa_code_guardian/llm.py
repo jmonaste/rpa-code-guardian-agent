@@ -15,7 +15,9 @@ Tests inject a fake subclass, so no other module talks to the model directly.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from typing import TypeVar
 
 import httpx
@@ -23,6 +25,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from pydantic import BaseModel, ValidationError
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -76,6 +80,51 @@ class GuardianLLMError(RuntimeError):
     """Raised when the model could not produce usable output after retries."""
 
 
+class GuardianLLMUnavailable(GuardianLLMError):
+    """The endpoint kept failing with transient errors (rate limit, gateway timeout).
+
+    Distinct from a schema/validation failure: when the transport itself is
+    down, trying a more permissive structured-output method is pointless, so
+    ``structured()`` aborts its method ladder instead of burning more calls.
+    """
+
+
+# Transient conditions worth retrying: rate limits, gateway errors, timeouts.
+_RETRYABLE_TYPES = frozenset({
+    "RateLimitError", "APITimeoutError", "APIConnectionError",
+    "InternalServerError", "ServiceUnavailableError",
+    "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "TimeoutException",
+})
+_RETRYABLE_MARKERS = (
+    "429", "rate limit", "too many requests",
+    "502", "503", "504", "bad gateway", "service unavailable",
+    "gateway time", "timed out", "timeout", "connection error", "overloaded",
+)
+
+_TAGISH_RE = re.compile(r"<[^>]{1,120}>")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True when the error looks transient (walks the exception cause chain)."""
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if type(cur).__name__ in _RETRYABLE_TYPES:
+            return True
+        text = str(cur).lower()
+        if any(marker in text for marker in _RETRYABLE_MARKERS):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
+def _error_summary(exc: BaseException | None) -> str:
+    """One clean line: gateways return whole HTML error pages, strip that."""
+    text = _TAGISH_RE.sub(" ", str(exc))
+    return re.sub(r"\s+", " ", text).strip()[:200]
+
+
 class GuardianLLM:
     """Two model slots (worker/lead) over one OpenAI-compatible endpoint."""
 
@@ -108,6 +157,47 @@ class GuardianLLM:
 
     # ------------------------------------------------------------------ #
 
+    def _invoke_with_retry(self, runner, messages):
+        """Invoke with exponential backoff on transient endpoint errors.
+
+        Local endpoints under load answer with 429s and gateways in front of
+        slow models answer with 504s; both usually succeed on a later attempt
+        once pressure drops. Non-transient errors propagate immediately.
+        """
+        retries = max(0, self.settings.llm_retries)
+        delay = max(0.1, self.settings.llm_retry_base_delay)
+        last: BaseException | None = None
+        for attempt in range(retries + 1):
+            started = time.perf_counter()
+            try:
+                result = runner.invoke(messages)
+                logger.debug(
+                    "LLM call ok in %.1fs (attempt %d/%d)",
+                    time.perf_counter() - started, attempt + 1, retries + 1,
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if not _is_retryable(exc):
+                    logger.debug(
+                        "LLM call failed with non-retryable error after %.1fs: %s",
+                        time.perf_counter() - started, _error_summary(exc),
+                    )
+                    raise
+                last = exc
+                if attempt < retries:
+                    logger.warning(
+                        "transient endpoint error (attempt %d/%d), retrying in %.0fs: %s",
+                        attempt + 1, retries + 1, delay, _error_summary(exc),
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 2, 60.0)
+        logger.error("giving up after %d attempts: %s", retries + 1, _error_summary(last))
+        raise GuardianLLMUnavailable(
+            f"endpoint still failing after {retries + 1} attempts: {_error_summary(last)}"
+        ) from last
+
+    # ------------------------------------------------------------------ #
+
     def structured(self, schema: type[T], system: str, user: str, role: str = "worker") -> T:
         """Return an instance of ``schema`` produced by the model.
 
@@ -120,9 +210,11 @@ class GuardianLLM:
         result = self._try_structured(llm, schema, system, user, "json_schema", retry=False)
         if result is not None:
             return result
+        logger.debug("structured %s: json_schema failed, trying function_calling", schema.__name__)
         result = self._try_structured(llm, schema, system, user, "function_calling", retry=True)
         if result is not None:
             return result
+        logger.debug("structured %s: function_calling failed, parsing plain JSON", schema.__name__)
         return self._structured_via_json(schema, system, user, role)
 
     def _try_structured(
@@ -132,12 +224,19 @@ class GuardianLLM:
 
         Returns the validated instance, or ``None`` if the endpoint does not
         support the method or the model did not produce a valid instance.
+        ``GuardianLLMUnavailable`` (transport dead after backoff) propagates:
+        falling through to a more permissive method cannot fix a dead endpoint
+        and would just burn more slow, failing calls.
         """
         try:
             runner = llm.with_structured_output(schema, method=method)
-            result = runner.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+            result = self._invoke_with_retry(
+                runner, [SystemMessage(content=system), HumanMessage(content=user)]
+            )
             if isinstance(result, schema):
                 return result
+        except GuardianLLMUnavailable:
+            raise
         except Exception as first_error:  # noqa: BLE001 - endpoint/validation quirks
             if not retry:
                 return None
@@ -147,11 +246,14 @@ class GuardianLLM:
             )
             try:
                 runner = llm.with_structured_output(schema, method=method)
-                result = runner.invoke(
-                    [SystemMessage(content=system), HumanMessage(content=user + retry_note)]
+                result = self._invoke_with_retry(
+                    runner,
+                    [SystemMessage(content=system), HumanMessage(content=user + retry_note)],
                 )
                 if isinstance(result, schema):
                     return result
+            except GuardianLLMUnavailable:
+                raise
             except Exception:  # noqa: BLE001
                 pass
         return None
@@ -169,7 +271,9 @@ class GuardianLLM:
             f"{user}\n\nRespond with ONLY a JSON object matching this schema"
             f" (no prose, no code fences):\n{json.dumps(schema.model_json_schema(), indent=1)}"
         )
-        reply = llm.invoke([SystemMessage(content=system), HumanMessage(content=prompt)])
+        reply = self._invoke_with_retry(
+            llm, [SystemMessage(content=system), HumanMessage(content=prompt)]
+        )
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
         text = _THINK_RE.sub("", text)
 
@@ -205,13 +309,14 @@ class GuardianLLM:
         messages: list[BaseMessage] = [SystemMessage(content=system), HumanMessage(content=user)]
 
         for _ in range(limit):
-            reply = llm.invoke(messages)
+            reply = self._invoke_with_retry(llm, messages)
             messages.append(reply)
             calls = getattr(reply, "tool_calls", None) or []
             if not calls:
                 text = reply.content if isinstance(reply.content, str) else str(reply.content)
                 return text, messages
             for call in calls:
+                logger.debug("tool call: %s(%s)", call["name"], str(call.get("args", {}))[:200])
                 tool = by_name.get(call["name"])
                 if tool is None:
                     output = f"ERROR: unknown tool {call['name']!r}"
@@ -223,8 +328,9 @@ class GuardianLLM:
                 messages.append(ToolMessage(content=output, tool_call_id=call["id"], name=call["name"]))
 
         # Out of budget: ask for a final answer without tools.
+        logger.debug("tool loop budget exhausted after %d iterations", limit)
         messages.append(HumanMessage(content="Tool budget exhausted. Answer now with what you have."))
-        reply = self._chat_model(role).invoke(messages)
+        reply = self._invoke_with_retry(self._chat_model(role), messages)
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
         messages.append(AIMessage(content=text))
         return text, messages

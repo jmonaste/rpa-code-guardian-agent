@@ -19,6 +19,28 @@ from .lint import lint_markdown, md_anchor, md_cell, normalize_prose
 MERMAID_MAX_EDGES = 60
 
 
+def _filter_evidence(inv: ProjectInventory, paths: list[str]) -> list[str]:
+    """Keep only cited evidence paths that actually exist in the project.
+
+    Verdicts cite workflow paths, but the model occasionally invents one or
+    cites with the wrong separator/case. Hallucinated citations are dropped so
+    the report never points the reader at a file that is not there; real ones
+    are returned in their canonical spelling.
+    """
+    canonical = {p.lower(): p for p in inv.workflows}
+    if inv.config_file:
+        canonical[str(inv.config_file).replace("\\", "/").lower()] = str(inv.config_file)
+    kept: list[str] = []
+    for raw in paths:
+        cleaned = raw.strip().strip("`").replace("\\", "/")
+        match = canonical.get(cleaned.lower())
+        if match is None and not cleaned.lower().endswith(".xaml"):
+            match = canonical.get(cleaned.lower() + ".xaml")
+        if match is not None and match not in kept:
+            kept.append(match)
+    return kept
+
+
 # --------------------------------------------------------------------------- #
 # Technical documentation
 # --------------------------------------------------------------------------- #
@@ -304,8 +326,8 @@ def render_compliance(state: dict | object) -> str:
     for req in requirements:
         item = compliance.get(req.id)
         verdict = item.verdict if item else "Not assessed"
-        evidence = ", ".join(item.evidence) if item and item.evidence else "-"
-        out.append(f"| {req.id} | {md_cell(req.text)} | {verdict} | {md_cell(evidence)} |")
+        cited = _filter_evidence(inv, item.evidence) if item and item.evidence else []
+        out.append(f"| {req.id} | {md_cell(req.text)} | {verdict} | {md_cell(', '.join(cited) or '-')} |")
 
     deviations = [
         (req, compliance[req.id]) for req in requirements

@@ -1,6 +1,6 @@
 from rpa_code_guardian.ingest.scanner import scan_project
 from rpa_code_guardian.model.summaries import Finding, NarrativeSections, WorkflowSummary
-from rpa_code_guardian.render.document import render_documentation
+from rpa_code_guardian.render.document import _filter_evidence, render_documentation
 from rpa_code_guardian.render.lint import lint_markdown, md_anchor, normalize_prose
 
 
@@ -31,6 +31,18 @@ def test_normalize_prose_unwraps_markdown_fence_and_odd_bullets():
     out = normalize_prose("```markdown\nSome text.\n\n• one\n• two\n```")
     assert "```" not in out
     assert "- one" in out and "- two" in out and "•" not in out
+
+
+def test_filter_evidence_drops_hallucinated_paths(sample_project):
+    inv = scan_project(sample_project)
+    cited = [
+        "Framework\\GetTransactionData.xaml",  # wrong separator -> canonicalized
+        "`Main.xaml`",  # backticks stripped
+        "Framework/GetTransactionData",  # missing extension -> completed
+        "Framework/SendEmailReport.xaml",  # hallucinated -> dropped
+    ]
+    kept = _filter_evidence(inv, cited)
+    assert kept == ["Framework/GetTransactionData.xaml", "Main.xaml"]
 
 
 def test_normalize_prose_leaves_code_fences_untouched():

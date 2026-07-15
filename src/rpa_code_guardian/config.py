@@ -63,6 +63,17 @@ class Settings(BaseSettings):
         "spend tokens thinking before answering; too low a budget truncates the JSON "
         "output and validation fails. Raise it if summaries still come back truncated.",
     )
+    llm_retries: int = Field(
+        default=3,
+        alias="GUARDIAN_LLM_RETRIES",
+        description="Retries per LLM call on transient endpoint errors "
+        "(429 rate limit, 502/503/504 gateway errors, timeouts).",
+    )
+    llm_retry_base_delay: float = Field(
+        default=2.0,
+        alias="GUARDIAN_LLM_RETRY_BASE_DELAY",
+        description="Initial backoff delay in seconds; doubles per retry (capped at 60s).",
+    )
 
     # --- Pipeline limits ---
     max_concurrency: int = Field(
