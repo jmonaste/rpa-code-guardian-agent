@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -17,6 +19,35 @@ from .config import load_settings
 
 app = typer.Typer(add_completion=False, help="Document and audit UiPath projects with a local LLM.")
 console = Console()
+
+_LOG_LEVELS = ("debug", "info", "warning", "error")
+
+
+def _setup_logging(level: str, log_file: Optional[Path]) -> None:
+    """Route the agent's loggers to the console and optionally to a file.
+
+    The LLM gateway logs every retry, backoff wait and structured-output method
+    degradation. 'warning' (the default) keeps endpoint trouble visible without
+    noise; 'debug' shows every model call with its timing. The file (when
+    given) always receives full detail with timestamps, regardless of the
+    console level, so a long run can be reviewed afterwards.
+    """
+    from rich.logging import RichHandler
+
+    logger = logging.getLogger("rpa_code_guardian")
+    logger.handlers.clear()
+    console_level = getattr(logging, level.upper(), logging.WARNING)
+    logger.setLevel(logging.DEBUG if log_file is not None else console_level)
+    handler = RichHandler(console=console, show_path=False, log_time_format="[%X]")
+    handler.setLevel(console_level)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    if log_file is not None:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+        )
+        logger.addHandler(file_handler)
 
 
 @app.callback()
@@ -36,9 +67,16 @@ def analyze(
     resume: Annotated[bool, typer.Option("--resume", help="Resume the previous interrupted run of this project.")] = False,
     no_cache: Annotated[bool, typer.Option("--no-cache", help="Ignore cached per-workflow summaries.")] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show every pipeline event.")] = False,
+    log_level: Annotated[str, typer.Option("--log-level", help="Console log level: debug, info, warning or error. 'debug' shows every LLM call with timing.")] = "warning",
+    log_file: Annotated[Optional[Path], typer.Option("--log-file", help="Also write full debug logs (with timestamps) to this file.")] = None,
 ) -> None:
     """Analyze a UiPath project and write Obsidian-ready documentation."""
     from .graph.builder import run_pipeline
+
+    if log_level.lower() not in _LOG_LEVELS:
+        console.print(f"[red]Invalid log level:[/red] {log_level} (use one of: {', '.join(_LOG_LEVELS)})")
+        raise typer.Exit(code=2)
+    _setup_logging(log_level, log_file)
 
     if not project_path.is_dir():
         console.print(f"[red]Not a directory:[/red] {project_path}")
@@ -65,29 +103,80 @@ def analyze(
         f"worker: {settings.resolved_worker_model()}, lead: {settings.resolved_lead_model()}"
     )
 
+    started = time.monotonic()
     done = {"summaries": 0, "verified": 0}
+    totals = {"workflows": 0, "requirements": 0}
+    progress = {"active": False}  # a \r progress line is on screen
+
+    def _line(text: str) -> None:
+        """Print a normal line, first closing any in-place progress line."""
+        if progress["active"]:
+            console.print("")
+            progress["active"] = False
+        console.print(text)
 
     def on_event(node: str, payload: object) -> None:
-        if node == "ingest" and isinstance(payload, dict):
-            inv = payload.get("inventory")
+        data = payload if isinstance(payload, dict) else {}
+        if node == "ingest":
+            inv = data.get("inventory")
+            waves = data.get("waves") or []
+            totals["workflows"] = sum(len(w) for w in waves)
             if inv is not None:
-                console.print(
-                    f"[cyan]ingest[/cyan]: {len(inv.workflows)} workflows, "
+                _line(
+                    f"[cyan]ingest[/cyan]: {len(inv.workflows)} workflows "
+                    f"({totals['workflows']} to analyze in {len(waves)} waves), "
                     f"REFramework={inv.is_reframework}"
                 )
             return
         if node == "summarize":
             done["summaries"] += 1
-            console.print(f"[cyan]map[/cyan]: {done['summaries']} workflows analyzed", end="\r")
+            total = f"/{totals['workflows']}" if totals["workflows"] else ""
+            console.print(f"[cyan]map[/cyan]: {done['summaries']}{total} workflows analyzed", end="\r")
+            progress["active"] = True
+            return
+        if node == "critic":
+            flagged = [w for w in data.get("warnings") or []]
+            if flagged:
+                _line(f"[cyan]critic[/cyan]: {len(flagged)} grounding issue(s) flagged")
+            else:
+                _line("[cyan]critic[/cyan]: narrative grounded")
+            return
+        if node == "findings":
+            found = data.get("findings") or []
+            by: dict[str, int] = {}
+            for f in found:
+                by[f.severity] = by.get(f.severity, 0) + 1
+            detail = ", ".join(f"{by[s]} {s.lower()}" for s in ("High", "Medium", "Low") if by.get(s))
+            _line(f"[cyan]findings[/cyan]: {len(found)} issue(s)" + (f" ({detail})" if detail else ""))
+            return
+        if node == "gapfill":
+            answers = data.get("gap_answers") or []
+            if answers:
+                _line(f"[cyan]gapfill[/cyan]: {len(answers)} open question(s) answered with project evidence")
+            else:
+                _line("[cyan]gapfill[/cyan]: nothing to verify")
+            return
+        if node == "extract_requirements":
+            totals["requirements"] = len(data.get("requirements") or [])
+            _line(f"[cyan]requirements[/cyan]: {totals['requirements']} extracted from the PDD")
             return
         if node == "verify_requirement":
             done["verified"] += 1
-            console.print(f"[cyan]verify[/cyan]: {done['verified']} requirements checked", end="\r")
+            total = f"/{totals['requirements']}" if totals["requirements"] else ""
+            console.print(f"[cyan]verify[/cyan]: {done['verified']}{total} requirements checked", end="\r")
+            progress["active"] = True
+            return
+        if node == "evidence_rescue":
+            revised = data.get("compliance") or {}
+            if revised:
+                _line(f"[cyan]evidence rescue[/cyan]: {len(revised)} verdict(s) re-checked against the project")
+            else:
+                _line("[cyan]evidence rescue[/cyan]: all verdicts already evidenced")
             return
         if verbose:
-            console.print(f"[dim]{node}[/dim]")
-        elif node in ("plan", "reduce", "gapfill", "compose", "extract_requirements", "compose_compliance"):
-            console.print(f"[cyan]{node}[/cyan] done")
+            _line(f"[dim]{node}[/dim]")
+        elif node in ("plan", "reduce", "compose", "compose_compliance"):
+            _line(f"[cyan]{node}[/cyan] done")
 
     try:
         state = run_pipeline(
@@ -122,11 +211,24 @@ def analyze(
         else:
             console.print("[red]No compliance report was produced.[/red]")
 
-    for warning in state.get("warnings", []) or []:
+    warnings = state.get("warnings", []) or []
+    for warning in warnings:
         console.print(f"[yellow]warning:[/yellow] {warning}")
+
+    analyzed = len(state.get("summaries") or {})
+    console.print(
+        f"[green]Done in {_fmt_duration(time.monotonic() - started)}[/green] — "
+        f"{analyzed} workflows analyzed, {len(warnings)} warning(s)"
+    )
 
     if not doc_md:
         raise typer.Exit(code=1)
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds >= 60:
+        return f"{int(seconds // 60)}m {int(seconds % 60)}s"
+    return f"{seconds:.0f}s"
 
 
 def _safe_name(name: str) -> str:
