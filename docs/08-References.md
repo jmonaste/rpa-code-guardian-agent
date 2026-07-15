@@ -30,8 +30,8 @@ technique in this project. Grouped by what you want to study.
 ## LangChain (model & tool layer)
 
 - [Structured output](https://python.langchain.com/docs/how_to/structured_output/)
-  — `with_structured_output`, the `method="function_calling"` vs `json_mode`
-  distinction that drives the retry ladder in `llm.py`.
+  — `with_structured_output` and the `method="json_schema"` /
+  `"function_calling"` distinction that drives the method ladder in `llm.py`.
 - [Tool calling](https://python.langchain.com/docs/how_to/tool_calling/)
   — `bind_tools`, `tool_calls` on `AIMessage`, `ToolMessage` responses: the
   raw loop implemented in `GuardianLLM.tool_loop`.

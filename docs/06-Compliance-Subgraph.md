@@ -57,8 +57,12 @@ same thing across requirements and models.
 
 ## Stage 3 — evidence rescue
 
-`evidence_rescue` gives the `Not verifiable` subset (capped at 8) a second
-chance with real evidence gathering:
+`evidence_rescue` selects every verdict that *needs* evidence (capped at 8):
+the `Not verifiable` subset, plus any `Compliant` / `Partially compliant`
+verdict whose cited evidence does not survive validation against the
+inventory (`_filter_evidence`, D11) — a claim of compliance backed by nothing,
+or by an invented path, is exactly the hallucination an audit must not ship.
+Each selected verdict gets a second chance with real evidence gathering:
 
 1. A fresh tool loop (`VERIFY_TOOL_SYSTEM`, `lead` role) searches the project
    for anything relevant to the requirement — search first, read selectively,
@@ -82,9 +86,13 @@ those manually, which is the correct behavior for an auditor.
   static-analysis compliance report must say so.
 - **Verdict summary** — counts per verdict.
 - **Requirements traceability matrix** — one row per requirement:
-  ID, condensed text, verdict, evidence paths. Requirements that never got a
-  verdict (extraction produced them but verification failed) show as
-  `Not assessed` rather than disappearing.
+  ID, condensed text, verdict, evidence paths. Cited evidence is filtered
+  through `_filter_evidence` first: paths are canonicalized (separators,
+  backticks, a missing `.xaml` extension) and anything that does not exist in
+  the inventory is dropped — the report never points the reader at a file
+  that is not there. Requirements that never got a verdict (extraction
+  produced them but verification failed) show as `Not assessed` rather than
+  disappearing.
 - **Gaps and deviations** — a detail block (justification + gap) for every
   non-`Compliant` item.
 - **Conclusion** — computed sentence: "N of M extracted requirements are fully
@@ -105,4 +113,5 @@ implementing artifacts, so a reviewer can audit any row independently.
 | A verification call fails | that requirement becomes `Not verifiable` + warning; run continues |
 | Rescue tool loop fails | warning; original `Not verifiable` verdict stands |
 | Model cites no evidence after rescue | recorder paths are used |
+| Compliant verdict cites an invented path | citation dropped from the matrix; verdict re-checked by the rescue pass |
 | PDD has no verifiable requirements | report says exactly that in the conclusion |
