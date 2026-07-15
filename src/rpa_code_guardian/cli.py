@@ -262,6 +262,142 @@ def analyze(
         raise typer.Exit(code=1)
 
 
+@app.command()
+def tune(
+    base_url: Annotated[Optional[str], typer.Option(help="OpenAI-compatible endpoint base URL (overrides .env).")] = None,
+    worker_model: Annotated[Optional[str], typer.Option(help="Worker model to probe (overrides .env).")] = None,
+    lead_model: Annotated[Optional[str], typer.Option(help="Lead model to probe (overrides .env).")] = None,
+    levels: Annotated[str, typer.Option("--levels", help="Comma-separated concurrency levels to sweep.")] = "1,2,4,8",
+    calls: Annotated[int, typer.Option("--calls", help="Probe calls per concurrency level.")] = 6,
+    skip_sweep: Annotated[bool, typer.Option("--skip-sweep", help="Only check connectivity, methods and truncation (no concurrency sweep).")] = False,
+    log_level: Annotated[str, typer.Option("--log-level", help="Console log level: debug, info, warning or error.")] = "warning",
+    log_file: Annotated[Optional[Path], typer.Option("--log-file", help="Also write full debug logs to this file.")] = None,
+) -> None:
+    """Probe the LLM endpoint and recommend the best call parameters."""
+    from rich.table import Table
+
+    from .llm import GuardianLLM
+    from .tune import recommend_concurrency, run_tune
+
+    if log_level.lower() not in _LOG_LEVELS:
+        console.print(f"[red]Invalid log level:[/red] {log_level} (use one of: {', '.join(_LOG_LEVELS)})")
+        raise typer.Exit(code=2)
+    _setup_logging(log_level, log_file)
+
+    try:
+        level_list = sorted({int(x) for x in levels.split(",") if x.strip()})
+    except ValueError:
+        console.print(f"[red]Invalid levels:[/red] {levels} (expected e.g. 1,2,4,8)")
+        raise typer.Exit(code=2)
+    if not level_list or any(lv < 1 for lv in level_list):
+        console.print(f"[red]Invalid levels:[/red] {levels} (levels must be >= 1)")
+        raise typer.Exit(code=2)
+
+    settings = load_settings(
+        openai_base_url=base_url,
+        GUARDIAN_WORKER_MODEL=worker_model,
+        GUARDIAN_LEAD_MODEL=lead_model,
+    )
+    console.print(
+        f"[bold]rpa-guardian tune[/bold] — endpoint: {settings.openai_base_url}, "
+        f"worker: {settings.resolved_worker_model()}, lead: {settings.resolved_lead_model()}"
+    )
+
+    llm = GuardianLLM(settings)
+    with console.status("probing endpoint..."):
+        report = run_tune(
+            settings, llm=llm, levels=level_list, calls_per_level=calls, skip_sweep=skip_sweep
+        )
+
+    if not report.reachable:
+        console.print(f"[red]Endpoint unreachable:[/red] {report.connectivity_detail}")
+        console.print("Check OPENAI_BASE_URL (must end in /v1), the server, and GUARDIAN_VERIFY_SSL.")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Endpoint reachable[/green] ({report.connectivity_detail})")
+    if report.available_models:
+        served = ", ".join(report.available_models[:10])
+        console.print(f"Served models: {served}")
+        for role, name in (("worker", settings.resolved_worker_model()), ("lead", settings.resolved_lead_model())):
+            if name not in report.available_models:
+                console.print(f"[yellow]warning:[/yellow] {role} model {name!r} is not in the served list")
+
+    method_table = Table(title="Structured output support")
+    method_table.add_column("Role / model")
+    method_table.add_column("Method")
+    method_table.add_column("Works")
+    method_table.add_column("Latency")
+    method_table.add_column("Error")
+    for role, results in report.methods.items():
+        model_name = settings.resolved_worker_model() if role == "worker" else settings.resolved_lead_model()
+        for r in results:
+            method_table.add_row(
+                f"{role} ({model_name})",
+                r.method,
+                "[green]yes[/green]" if r.ok else "[red]no[/red]",
+                f"{r.seconds:.1f}s",
+                r.error[:60],
+            )
+    console.print(method_table)
+
+    slow = 0.0
+    for results in report.methods.values():
+        slow = max(slow, max((r.seconds for r in results if r.ok), default=0.0))
+
+    for role, trunc in report.truncation.items():
+        if trunc.error:
+            console.print(f"[yellow]truncation probe failed for {role}:[/yellow] {trunc.error}")
+        elif trunc.truncated:
+            console.print(
+                f"[yellow]warning:[/yellow] {role} output was truncated "
+                f"(finish_reason={trunc.finish_reason}) — raise GUARDIAN_MAX_TOKENS "
+                f"(current: {settings.max_tokens})"
+            )
+
+    recommended = None
+    if report.sweep:
+        sweep_table = Table(title=f"Concurrency sweep ({calls} calls per level, worker model)")
+        sweep_table.add_column("Parallel")
+        sweep_table.add_column("OK")
+        sweep_table.add_column("Errors")
+        sweep_table.add_column("Retried")
+        sweep_table.add_column("Avg latency")
+        sweep_table.add_column("Throughput")
+        for s in report.sweep:
+            ok_calls = s.calls - s.errors
+            sweep_table.add_row(
+                str(s.level),
+                str(ok_calls),
+                f"[red]{s.errors}[/red]" if s.errors else "0",
+                f"[yellow]{s.retried}[/yellow]" if s.retried else "0",
+                f"{s.avg_seconds:.1f}s",
+                f"{s.throughput:.2f} calls/s",
+            )
+        console.print(sweep_table)
+        recommended = recommend_concurrency(report.sweep)
+
+    console.print("\n[bold]Recommended .env[/bold]")
+    working_methods = {
+        role: [r.method for r in results if r.ok] for role, results in report.methods.items()
+    }
+    if recommended is not None:
+        console.print(f"GUARDIAN_MAX_CONCURRENCY={recommended}")
+    if any(t.truncated for t in report.truncation.values() if not t.error):
+        console.print(f"GUARDIAN_MAX_TOKENS={settings.max_tokens * 2}  # current {settings.max_tokens} truncates")
+    if slow and slow * 4 > settings.request_timeout:
+        console.print(
+            f"GUARDIAN_REQUEST_TIMEOUT={int(max(slow * 8, settings.request_timeout))}"
+            f"  # slowest good call took {slow:.0f}s"
+        )
+    for role, methods in working_methods.items():
+        if not methods:
+            console.print(
+                f"[red]warning:[/red] no structured-output method works for the {role} model; "
+                "every call would rely on retries and fallbacks"
+            )
+    if not any(t.truncated for t in report.truncation.values()) and recommended is None and all(working_methods.values()):
+        console.print("(current settings look fine)")
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds >= 60:
         return f"{int(seconds // 60)}m {int(seconds % 60)}s"
